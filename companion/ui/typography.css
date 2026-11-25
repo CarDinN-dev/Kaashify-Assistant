@@ -1,0 +1,11 @@
+@font-face {
+  font-family: Geist;
+  src: url("Geist-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  --app-sans: Geist, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}

@@ -7,7 +7,10 @@ Hands. Notes, reminders, and speech processing are available on the device.
 
 ## Installation
 
-Run `Kaashify-Setup.exe` on Windows 10 or 11 x64. The first launch opens the
+Open the [latest release](https://github.com/CarDinN-dev/Kaashify-Assistant/releases/latest),
+follow the Windows installer link, and choose **Download**. This private
+repository requires a signed-in account with access. Run `Kaashify-Setup.exe`
+on Windows 10 or 11 x64. The first launch opens the
 dashboard and offers a quick tour. Add a Gemini, Anthropic, Nvidia, or OpenAI
 key in **Settings → Keys**, or use a signed-in installation of Claude Code.
 Kaashify sends the question and, when needed, a screenshot to the chosen

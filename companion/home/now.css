@@ -3,15 +3,17 @@
    never named here: the strip's pill takes its accent from the overlay, which
    reads it from the spec. */
 :root { --accent: #fff; --accent-hi: #fff; --accent-ink: #000; --d-card-bd: rgba(255,255,255,.18); --d-card-hover: rgba(255,255,255,.32); }
-body { background: #000; }
-.rail { background: #07080c; border-right-color: rgba(255,255,255,.08); }
+body { background: #090b10; }
+.rail { background: #10131a; border-right-color: rgba(255,255,255,.08); }
+main > header h2 { font-weight: 620; letter-spacing: -.045em; }
 nav { gap: 2px; }
 nav button { padding: 7px 12px; background: none; border-color: transparent; border-radius: 9px; color: #c9ccd8; }
 nav button:hover { background: rgba(255,255,255,.05); border-color: transparent; }
-nav button.active { color: #fff; background: rgba(255,255,255,.09); border-color: transparent; }
+nav button.active { color: #f7faff; background: #1e2939; border-color: transparent; }
 .nav-dot { display: none; }
 .card, .glass.card { border-color: var(--d-card-bd); }
 .glass { background: none; box-shadow: none; }
+.settings-grid .card, .feedback-card { background: #10131a; }
 .primary { background: #fff; color: #000; border-color: #fff; }
 .primary:hover { background: #e6e7ec; }
 button { border-radius: 7px; }
@@ -28,7 +30,7 @@ body.home-view #update-card { margin: 12px 22px 0; }
 /* The strip: the greeting and the talk key beside the pill, life size. */
 .d-strip { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
 .d-hello { flex: 1; min-width: 0; }
-#d-greet { font-size: 20px; font-weight: 600; line-height: 26px; color: #fff; }
+#d-greet { font-size: 24px; font-weight: 630; line-height: 1.2; letter-spacing: -.045em; color: #fff; }
 #d-count { font-size: 13px; line-height: 18px; color: #c9ccd8; }
 #d-key { display: flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 12px; color: #9aa0b4; }
 #d-key kbd, #d-esc kbd { font: 600 11px/1 var(--font); color: #eceef5; background: none; border: 1px solid rgba(255,255,255,.35); border-radius: 5px; padding: 3px 6px; }

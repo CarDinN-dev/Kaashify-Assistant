@@ -2681,6 +2681,10 @@
   // closes, the dots open the full sheet for anyone who wants the verbs.
   const quickAsk = $('#quick-ask');
   const quickInput = $('#quick-input');
+  const quickSend = $('#quick-send');
+  function syncQuickSend() {
+    quickSend.disabled = !quickInput.value.trim();
+  }
   // `about` is set when Ctrl+Shift+T opened the composer for the control the
   // thread is pointing at: the line then asks about that control.
   let quickAbout = null;
@@ -2700,6 +2704,7 @@
     syncSlotFold();
     setIgnoreSafe(false);
     quickInput.value = '';
+    syncQuickSend();
     quickInput.focus();
     syncKnotUi();
     // A brain process starts now, so the ask that follows pays only the model.
@@ -2731,10 +2736,7 @@
     syncKnotUi();
     releaseKeys();
   }
-  quickInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); closeQuickAsk(); return; }
-    if (e.key !== 'Enter' || e.shiftKey) return;
-    e.preventDefault();
+  function submitQuickAsk() {
     const text = quickInput.value.trim();
     const about = quickAbout;
     if (!text) { closeQuickAsk(); if (!about && !standalone) runMode('guide', ''); return; }
@@ -2743,6 +2745,15 @@
     ack();
     closeQuickAsk();
     if (kaashify.guideAsk) kaashify.guideAsk({ text, source: 'typed', about: !!about });
+  }
+  quickInput.addEventListener('input', syncQuickSend);
+  quickSend.addEventListener('click', submitQuickAsk);
+  quickAsk.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeQuickAsk(); return; }
+    if (e.target !== quickInput || e.key !== 'Enter' || e.shiftKey) return;
+    e.preventDefault();
+    submitQuickAsk();
   });
   // Ctrl+Shift+T (main): the thread is already on the control under the
   // cursor; the composer opens for a question about it.

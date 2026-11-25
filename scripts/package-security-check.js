@@ -38,7 +38,8 @@ const forbiddenPaths = entries.filter((entry) =>
 );
 
 // The standalone archive must never contain src/config.js.
-const required = companionProfile ? ['src/main-companion.js', 'src/profile-file.js', 'companion/index.js', 'companion/renderer/index.html', 'companion/home/index.html', 'companion/src/reflex/jev.js'] : ['src/license.js', 'src/limits.js', 'src/main.js', 'renderer/index.html'];
+const required = companionProfile ? ['src/main-companion.js', 'src/profile-file.js', 'companion/index.js', 'companion/renderer/index.html', 'companion/home/index.html', 'companion/src/reflex/jev.js',
+  'companion/ui/typography.css', 'companion/ui/Geist-Variable.woff2', 'companion/ui/Geist-OFL.txt'] : ['src/license.js', 'src/limits.js', 'src/main.js', 'renderer/index.html'];
 const missingPaths = required.filter((entry) => !entries.includes(entry));
 if (companionProfile) {
   // whisper-server keeps the speech model loaded between asks (npm run setup:voice fetches it).

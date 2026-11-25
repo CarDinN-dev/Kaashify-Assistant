@@ -6,6 +6,11 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 
 ---
 
+Geist Sans by Vercel and basement.studio is bundled under the SIL Open Font
+License 1.1. Its license ships in `companion/ui/Geist-OFL.txt`.
+
+---
+
 Fable, Kaashify's voice, ships in `resources/voice/kokoro-multi-lang-v1_0` (from 0.1.20):
 
 - Kokoro-82M v1.0 model and voices (hexgrad), as converted for sherpa-onnx by k2-fsa

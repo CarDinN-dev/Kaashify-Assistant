@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
   <title>Kaashify</title>
+  <link rel="stylesheet" href="../ui/typography.css" />
   <link rel="stylesheet" href="styles.css?v=knot-day1" />
   <link rel="stylesheet" href="knot-look.css?v=knot-day1" />
   <link rel="stylesheet" href="pill.css?v=knot-day1" />
@@ -27,8 +28,9 @@
   <!-- The quick ask: one quiet line by Kaashify. Click Kaashify, type, Enter.
        Voice is optional; this is the everyday path. -->
   <div id="quick-ask" class="glass no-drag hidden" role="dialog" aria-label="Ask Kaashify">
-    <input id="quick-input" type="text" placeholder="What do you need help with?" spellcheck="false" autocomplete="off" />
-    <button id="quick-more" type="button" title="Open the full sheet" aria-label="Open the full sheet">&#8943;</button>
+    <input id="quick-input" type="text" aria-label="Question" placeholder="What do you need help with?" spellcheck="false" autocomplete="off" />
+    <button id="quick-more" type="button" title="Open the full sheet" aria-label="Open the full sheet"></button>
+    <button id="quick-send" type="button" title="Send question" aria-label="Send question" disabled></button>
   </div>
   <!-- App hint: three words by Kaashify when the front app has kept
        walkthroughs. Kaashify loosens a little; no thread until asked. -->
