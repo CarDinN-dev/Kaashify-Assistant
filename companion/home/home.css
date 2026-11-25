@@ -75,5 +75,5 @@ kbd{font:12px var(--mono);color:var(--marble);background:var(--fill-2);border:1p
 .mic-meter { height: 8px; border-radius: 4px; background: rgba(255,255,255,.08); overflow: hidden; margin: 6px 0 2px; }
 .mic-meter i { display: block; height: 100%; width: 0; background: #b9f0cc; transition: width 80ms linear; }
 
-.support-wordmark{display:block;width:172px;max-width:100%;height:auto;filter:brightness(0) invert(.94);margin:0 0 12px}
+.support-wordmark{display:block;width:172px;max-width:100%;height:auto;margin:0 0 12px}
 .feedback-card #contact-kaashify{margin-top:12px}
