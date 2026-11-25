@@ -1,0 +1,11 @@
+Kaashify includes modified source code and original contributions by Pranav Desu.
+
+Copyright 2026 Pranav Desu
+Copyright 2026 Kaashify
+
+Upstream source at release v0.1.39:
+https://github.com/potlakai/nus-companion/tree/3128b194ec28836c69b68eda856e55eb6dfc2388
+
+The modified build uses Kaashify branding, a separate Windows application
+identity, and standalone provider setup. See LICENSE and THIRD-PARTY.md for
+license terms and additional attributions.
