@@ -26,6 +26,20 @@ Kaashify uses its own Windows app identity and stores its profile in
 [Kaashify contact page](https://www.kaashify.com/contact). This standalone build
 has no account sync, usage telemetry, or hosted update feed.
 
+## Choose AI models
+
+Open **Settings → Keys → AI models** to choose Gemini, NVIDIA, Anthropic,
+or OpenAI and enter the provider’s exact model IDs. **Fast** and **Smart**
+are used for chat. **Screen** is used for screenshots, pointing, and Hands.
+A blank field uses the provider’s built-in model for that feature. You can
+use the same vision-capable model in all three fields.
+
+For example, NVIDIA lists `google/gemma-4-31b-it` alongside the built-in
+Nemotron model. Your NVIDIA key must have access to the model you choose.
+Use **Test** beside a model field to check the ID with your saved key. The
+screen test uses a generated color sample. Exact local app launches and
+hands-free dictation still run on your device.
+
 ## Quick Ask and dictation
 
 Say **Open Notepad** with the talk key or enter it in floating Quick Ask.

@@ -31,6 +31,25 @@ test('both lanes wait for the Jev result and a second changed problem is not blo
   assert.equal(a.looking, false);
   assert.equal(w.records.length,1); assert.equal(w.records[0].agreed, true);
 });
+test('a new problem uses the current screen model for both lanes after settings change', async () => {
+  let selected = 'old/vision-model';
+  const called = [];
+  const { a, w } = rig({
+    modelForLane: () => selected,
+    solveLane: async (request) => {
+      called.push(request.model);
+      const raw = request.lane === 'fast' ? fast : check;
+      request.onToken(raw);
+      return { text: raw };
+    },
+  });
+  selected = 'google/gemma-4-31b-it';
+  await a.solveNow({ auto: true, text });
+  assert.deepEqual(called, [selected, selected]);
+  assert.equal(w.records[0].fastModel, selected);
+  assert.equal(w.records[0].checkerModel, selected);
+});
+
 test('Jev outage requires two stable OCR reads and empty OCR never falls open', async () => {
   const { a,w } = rig({ later: () => 1, cancel: () => {} }); w.gate = null;
   await a.look({ settled:true }); assert.equal(w.calls.length,0);

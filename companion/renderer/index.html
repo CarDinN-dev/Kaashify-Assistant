@@ -187,8 +187,9 @@
           <div class="s-field"><span>Anthropic</span><input id="key-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" /></div>
           <div class="s-field"><span>Nvidia</span><input id="key-nvidia" type="password" placeholder="nvapi-..." autocomplete="off" /></div>
           <label class="s-label">Models <span class="s-hint">fast = Smart off · smart = Smart on</span></label>
-          <div class="s-field"><span>Fast</span><input id="model-fast" type="text" autocomplete="off" /></div>
-          <div class="s-field"><span>Smart</span><input id="model-smart" type="text" autocomplete="off" /></div>
+          <div class="s-field"><span>Fast</span><input id="model-fast" type="text" autocomplete="off" spellcheck="false" maxlength="200" /></div>
+          <div class="s-field"><span>Smart</span><input id="model-smart" type="text" autocomplete="off" spellcheck="false" maxlength="200" /></div>
+          <div class="s-field"><span>Screen</span><input id="model-vision" type="text" autocomplete="off" spellcheck="false" maxlength="200" placeholder="Built-in vision model" aria-label="Screen model ID" /></div>
         </details>
 
         <details class="s-more">
@@ -215,7 +216,7 @@
           <div class="s-resume-actions"><span class="s-hint">Maximum 12,000 characters</span><button id="clear-resume" type="button">Clear résumé</button></div>
         </details>
 
-        <div class="s-status" id="s-status"></div>
+        <div class="s-status" id="s-status" role="status"></div>
       </div>
     </div>
   </div>

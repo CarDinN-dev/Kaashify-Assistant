@@ -137,6 +137,36 @@ test('without system encryption, save preferences and keep provider keys only in
   }
 });
 
+test('model choices survive restart and provider switching without exposing stored keys', (t) => {
+  const { modelSettingsPatch } = require('../src/models');
+  const r = rig();
+  t.after(() => fs.rmSync(r.dir, { recursive: true, force: true }));
+  r.quiet(() => {
+    r.store.setSettings({ apiKeys: { gemini: 'gemini-key-fixture', nvidia: 'nvidia-key-fixture' } });
+    r.store.setSettings(modelSettingsPatch({
+      provider: 'nvidia',
+      models: { nvidia: { fast: 'google/gemma-4-31b-it', vision: 'vision/model' } },
+    }));
+  });
+  const restarted = rig({ dir: r.dir });
+  const prefs = restarted.quiet(() => restarted.store.rendererSettings());
+  assert.equal(prefs.provider, 'nvidia');
+  assert.equal(prefs.models.nvidia.fast, 'google/gemma-4-31b-it');
+  assert.equal(prefs.models.nvidia.vision, 'vision/model');
+  assert.equal(prefs.models.gemini.fast, 'gemini-3.6-flash');
+  assert.equal(prefs.keys.nvidia, true);
+  assert.doesNotMatch(JSON.stringify(prefs), /key-fixture/);
+
+  restarted.quiet(() => restarted.store.setSettings(modelSettingsPatch({
+    provider: 'gemini',
+    models: { nvidia: { fast: '', vision: '' } },
+  })));
+  const reset = onDisk(r.file);
+  assert.equal(reset.provider, 'gemini');
+  assert.equal(reset.models.nvidia.fast, reset.models.nvidia.smart);
+  assert.equal(reset.models.nvidia.vision, '');
+});
+
 test('a legacy plaintext key remains usable during migration and disappears from disk', () => {
   for (const available of [true, false]) {
     const r = rig({ available });

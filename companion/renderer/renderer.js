@@ -1127,7 +1127,21 @@
   // Take the mouse immediately: waiting for a probe tick to notice the modal
   // is what made the panel look open but dead to clicks.
   function openSettings() { fillSettings(); showSurface(scrim); setIgnoreSafe(false); }
-  function closeSettings() { cancelShortcutRecording(); saveSettings(); hideSurface(scrim); setIgnoreSafe(true); }
+  async function closeSettings() {
+    const done = $('#s-close');
+    if (done.disabled) return;
+    done.disabled = true;
+    cancelShortcutRecording();
+    try {
+      await saveSettings();
+      hideSurface(scrim);
+      setIgnoreSafe(true);
+    } catch (error) {
+      $('#s-status').textContent = String(error.message || 'Could not save settings.').replace(/^Error invoking remote method '[^']+': Error: /, '');
+    } finally {
+      done.disabled = false;
+    }
+  }
   // Standalone has one settings surface, the Kaashify window; the overlay
   // sheet stays for the desktop build. Same gear, same shortcut, one place.
   function openAnySettings(section) { if (standalone && kaashify.openSettings) kaashify.openSettings(section || ''); else openSettings(); }
@@ -1154,6 +1168,7 @@
     $('#report-to-kaashify').checked = !!settings.reportToNus;
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    $('#model-vision').value = m.vision || '';
     syncAssistShortcutLabels();
     $('#s-status').textContent = statusText();
     refreshPackStatus();
@@ -1220,30 +1235,34 @@
     document.querySelectorAll('#provider-seg button').forEach((x) => x.classList.toggle('on', x === b));
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    $('#model-vision').value = m.vision || '';
     $('#s-status').textContent = statusText();
   }));
   async function saveSettings() {
     const apiKeys = {};
     for (const provider of providerKeys) {
-      const input = $('#key-' + provider);
-      if (input.value.trim()) apiKeys[provider] = input.value.trim();
-      input.value = '';
+      const value = $('#key-' + provider).value.trim();
+      if (value) apiKeys[provider] = value;
     }
-    settings.resumeContext = $('#resume-context').value.trim();
-    settings.packPath = $('#pack-path').value.trim();
-    settings.sparPath = $('#spar-path').value.trim();
-    settings.smart = $('#smart-mode').checked;
-    settings.speakReplies = $('#speak-replies').checked;
-    settings.shareNusContextWithProvider = $('#share-kaashify-context').checked;
-    settings.reportToNus = $('#report-to-kaashify').checked;
-    settings.persistTranscripts = $('#persist-transcripts').checked;
-    settings.saveAudio = $('#save-audio').checked;
-    settings.stealth = $('#stealth-mode').checked;
-    if (!settings.models[settings.provider]) settings.models[settings.provider] = {};
-    settings.models[settings.provider].fast = $('#model-fast').value.trim();
-    settings.models[settings.provider].smart = $('#model-smart').value.trim();
-    const saved = await kaashify.settingsSet({ ...settings, apiKeys });
-    if (saved?.keys) settings.keys = saved.keys;
+    const models = {};
+    for (const slot of ['fast', 'smart', 'vision']) models[slot] = $('#model-' + slot).value.trim();
+    const saved = await kaashify.settingsSet({
+      ...settings,
+      resumeContext: $('#resume-context').value.trim(),
+      packPath: $('#pack-path').value.trim(),
+      sparPath: $('#spar-path').value.trim(),
+      smart: $('#smart-mode').checked,
+      speakReplies: $('#speak-replies').checked,
+      shareNusContextWithProvider: $('#share-kaashify-context').checked,
+      reportToNus: $('#report-to-kaashify').checked,
+      persistTranscripts: $('#persist-transcripts').checked,
+      saveAudio: $('#save-audio').checked,
+      stealth: $('#stealth-mode').checked,
+      models: { [settings.provider]: models },
+      apiKeys,
+    });
+    if (saved) settings = saved;
+    for (const provider of providerKeys) $('#key-' + provider).value = '';
     syncRehearsalCluster();
   }
 

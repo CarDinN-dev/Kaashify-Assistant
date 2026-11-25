@@ -77,3 +77,12 @@ kbd{font:12px var(--mono);color:var(--marble);background:var(--fill-2);border:1p
 
 .support-wordmark{display:block;width:172px;max-width:100%;height:auto;margin:0 0 12px}
 .feedback-card #contact-kaashify{margin-top:12px}
+
+#model-form{margin-top:22px;padding-top:16px;border-top:1px solid var(--bd-hair)}
+#model-form h4{margin:0 0 12px;font-size:15px;font-weight:600}
+.model-row{display:grid;grid-template-columns:minmax(104px,36%) minmax(0,1fr) auto;align-items:center;gap:8px;margin:8px 0}
+.model-row input,.model-row select{min-width:0;width:100%}
+.model-row select{grid-column:2/-1}
+#model-note{overflow-wrap:anywhere;margin-bottom:0}
+#model-note:empty{display:none}
+@media(max-width:520px){.model-row{grid-template-columns:minmax(0,1fr) auto}.model-row label,.model-row select{grid-column:1/-1}}

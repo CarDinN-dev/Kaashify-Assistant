@@ -94,7 +94,11 @@ test('Nvidia\'s removed 11b vision model is retired, in the defaults and in a sa
   // 0.1.36: the 90b it moved to was ended too (2026-11-16); both now go to Nemotron 3.5 Super VL
   // (companion/test/nvidia-model-0136.test.js loads a saved file through the store).
   const store = read('companion/src/store.js');
-  assert.match(store, /nvidia: \{ fast: 'nvidia\/nemotron-3\.5-super-vl-120b-a12b', smart: 'nvidia\/nemotron-3\.5-super-vl-120b-a12b' \}/);
+  const { DEFAULT_MODELS } = require('../src/models');
+  assert.deepEqual(DEFAULT_MODELS.nvidia, {
+    fast: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+    smart: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  });
   assert.match(store, /'meta\/llama-3\.2-11b-vision-instruct': 'nvidia\/nemotron-3\.5-super-vl-120b-a12b',/);
 });
 

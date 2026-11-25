@@ -147,9 +147,25 @@
     });
     await renderSaved();
   }
+  const modelSlots = ['fast', 'smart', 'vision'];
+  let modelSettings, modelTestRun = 0;
+  function fillModelFields(provider) {
+    for (const slot of modelSlots) {
+      $('#model-' + slot + '-home').value = modelSettings?.models?.[provider]?.[slot] || '';
+    }
+  }
+  function paintModelSettings(s) {
+    modelSettings = s;
+    $('#model-provider-home').value = s.provider;
+    $('#model-mode-home').value = s.smart ? 'smart' : 'fast';
+    fillModelFields(s.provider);
+  }
+
   async function settings() {
     const [s,status,intents] = await Promise.all([api.settingsGet(),api.status(),api.intents()]);
     paintStatus(status);
+    if (!$('#model-form').matches(':focus-within')) paintModelSettings(s);
+    else modelSettings = s;
     for(const key of ['typesafe','gemini','nvidia','anthropic','openai']) {
       const set=key==='typesafe' ? status.reflex.key : s.keys[key];
       const badge=$('#'+key+'-state');
@@ -332,6 +348,44 @@
     await api.settingsSet({apiKeys:{[which]:v}});input.value='';await settings();
   }
   $$('[data-test]').forEach(b=>b.onclick=()=>run(async()=>{await saveTyped(b.dataset.test);await testKey(b.dataset.test);},b));
+  $('#model-provider-home').onchange = (e) => {
+    modelTestRun++;
+    fillModelFields(e.target.value);
+    $('#model-note').textContent = '';
+  };
+  $('#model-form').onsubmit = (e) => {
+    e.preventDefault();
+    run(async () => {
+      modelTestRun++;
+      const provider = $('#model-provider-home').value;
+      const ids = Object.fromEntries(modelSlots.map((slot) => [slot, $('#model-' + slot + '-home').value]));
+      const saved = await api.settingsSet({
+        provider, smart: $('#model-mode-home').value === 'smart', models: { [provider]: ids },
+      });
+      paintModelSettings(saved);
+      await settings();
+      $('#model-note').textContent = saved.keys[provider]
+        ? 'Models saved. ' + providerLabels[saved.provider] + ' is active.'
+        : 'Models saved. Add your ' + providerLabels[provider] + ' key to use them.';
+    }, e.submitter);
+  };
+  $$('[data-model-test]').forEach((button) => {
+    button.onclick = () => run(async () => {
+      const slot = button.dataset.modelTest;
+      const provider = $('#model-provider-home').value;
+      const modelId = $('#model-' + slot + '-home').value;
+      const label = button.getAttribute('aria-label').replace(/^Test /, '');
+      const out = $('#model-note');
+      const runId = ++modelTestRun;
+      out.textContent = 'Testing ' + label + '…';
+      try {
+        const result = await api.testModel({ provider, slot, modelId, smart: $('#model-mode-home').value === 'smart' });
+        if (runId === modelTestRun) out.textContent = result.ok ? label + ' passed in ' + result.ms + ' ms.' : result.error;
+      } catch (error) {
+        if (runId === modelTestRun) out.textContent = String(error.message || 'Model test failed.').replace(/^Error invoking remote method '[^']+': Error: /, '');
+      }
+    }, button);
+  });
   // -------- Get started: the tour (companion/src/tour.js, run by Kaashify) --------
   // One card. The tour itself runs on the overlay, over the person's screen.
   function paintStartNav(st){$('#tour-card').hidden=!(st&&(st.show||st.running));}

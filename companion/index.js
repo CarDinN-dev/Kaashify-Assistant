@@ -13,6 +13,7 @@ const store = require('./src/store');
 const { captureScreenshot } = require('./src/screen');
 const { createSTT } = require('./src/stt');
 const { createLLM } = require('./src/llm');
+const { modelSettingsPatch, selectModel } = require('./src/models');
 const { plainAskError } = require('./src/ask-error');
 const { MODES } = require('./src/prompts');
 const { appendResumeContext } = require('./src/profile-context');
@@ -1492,8 +1493,8 @@ function registerShortcuts() {
 const OVERLAY_BOOLEANS = new Set(['speakReplies', 'onboarded', 'introSeen', 'hideFromCapture', 'openMic', 'sounds', 'proactive', 'focusGuard', 'smart', 'tasks', 'knotHidden', 'knotIsland', 'hands']);
 const OVERLAY_STRINGS = new Set(['packPath', 'sparPath', 'resumeContext', 'micDeviceId', 'micDeviceLabel']);
 function overlayPatch(patch) {
-  const clean = {};
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return clean;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return {};
+  const clean = modelSettingsPatch(patch);
   for (const [key, value] of Object.entries(patch)) {
     if (OVERLAY_BOOLEANS.has(key) && typeof value === 'boolean') clean[key] = value;
     else if (OVERLAY_STRINGS.has(key) && typeof value === 'string' && value.length <= 4096) clean[key] = value;
@@ -2943,9 +2944,10 @@ function solveModelFor(lane, req) {
   const settings = store.getSettings();
   const own = createLLM(settings);
   const usesOwn = own.ready && (!FORCE_CLAUDE_GUIDE || typeof hooks.desktopComplete !== 'function');
-  if (usesOwn && own.provider !== 'anthropic') {
-    const tiers = settings.models[own.provider] || {};
-    return (lane === 'fast' ? tiers.fast : tiers.smart) || own.model;
+  const customClaudeScreen = own.provider === 'anthropic' && process.env.KAASHIFY_COMPANION_CLAUDE_API !== '1'
+    && settings.models.anthropic?.vision;
+  if (usesOwn && (own.provider !== 'anthropic' || customClaudeScreen)) {
+    return selectModel(settings, own.provider, lane === 'fast' ? 'fast' : 'smart', { image: true });
   }
   if (req && req.model) return req.model;
   return lane === 'fast' ? (process.env.KAASHIFY_ASSIGNMENT_FAST_MODEL || 'claude-sonnet-5') : SOLVE_MODEL;
@@ -3052,8 +3054,7 @@ function getAssignment() {
       return { text: await llm.complete(req), provider: llm.provider };
     },
     // Six-fixture benchmark, 2026-09-21: Sonnet 0 wrong, Haiku 4 wrong.
-    fastModel: solveModelFor('fast'),
-    checkerModel: solveModelFor('checker'),
+    modelForLane: solveModelFor,
     hedgeAfterMs: process.env.KAASHIFY_ASSIGNMENT_HEDGE_MS === '0' ? 0 : 4000,
     solveLane: async (req) => {
       const llm = solveLlm();

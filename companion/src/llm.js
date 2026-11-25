@@ -1,3 +1,4 @@
+const { NVIDIA_VISION, selectModel } = require('./models');
 const DEBUG = false; // Set to false to disable debug logging
 // LLM factory: OpenAI / Anthropic / Gemini behind one streaming interface.
 // stream({ system, turns:[{role,text}], imageDataUrl, maxTokens, onToken }) -> Promise<fullText>
@@ -14,12 +15,13 @@ function stripDataUrl(dataUrl) {
 // text has arrived, that long without a new token ends the call with the text.
 // extra: fields one provider needs in the request body and others would refuse (Nvidia's
 // Nemotron takes reasoning_effort; see nvidiaArgs).
-async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal, idleAfterTextMs, extra }) {
-  if (idleAfterTextMs > 0) return streamUntilIdle({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal, extra }, idleAfterTextMs);
+async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal, idleAfterTextMs, extra, nativeOpenAI = false }) {
+  if (idleAfterTextMs > 0) return streamUntilIdle({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal, extra, nativeOpenAI }, idleAfterTextMs);
   if (DEBUG) console.log('[DEBUG LLM] streamOpenAI called', { model, baseURL, hasImage: !!imageDataUrl, maxTokens });
   const OpenAI = require('openai');
   const client = new OpenAI({ apiKey, baseURL });
-  const messages = [{ role: 'system', content: system }];
+  const developerRole = nativeOpenAI && /^(?:gpt-5|o[1-9])(?:-|$)/i.test(model);
+  const messages = system ? [{ role: developerRole ? 'developer' : 'system', content: system }] : [];
   turns.forEach((t, i) => {
     const last = i === turns.length - 1;
     if (last && imageDataUrl && t.role === 'user') {
@@ -35,7 +37,8 @@ async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTok
   try {
     // signal: a stop (Esc, "stop") closes the stream instead of letting the
     // reply run to completion (2026-10-31; the Anthropic and Gemini paths already did).
-    const stream = await client.chat.completions.create({ ...(extra || {}), model, messages, stream: true, max_tokens: maxTokens }, signal ? { signal } : undefined);
+    const limit = nativeOpenAI ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens };
+    const stream = await client.chat.completions.create({ ...extra, model, messages, stream: true, ...limit }, signal ? { signal } : undefined);
     let full = '';
     for await (const part of stream) {
       if (signal && signal.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
@@ -116,14 +119,8 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
   }
 }
 
-// Same contract as streamAnthropic: signal aborts the losing lane, json asks
-// for a JSON object, onUsage settles the spend ledger, assignment refuses a
-// truncated reply. Until 2026-09-30 all four were dropped on the floor here,
-// so a Gemini-key assignment run could neither cancel nor settle.
-async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, signal, json, onUsage, assignment }) {
-  if (DEBUG) console.log('[DEBUG LLM] streamGemini called', { model, hasImage: !!imageDataUrl, maxTokens });
-  const { GoogleGenAI } = require('@google/genai');
-  const ai = new GoogleGenAI({ apiKey });
+// Older Gemma releases accept instructions inside the first user turn.
+function geminiContents(turns, imageDataUrl, system, model) {
   const contents = turns.map((t, i) => {
     const last = i === turns.length - 1;
     const parts = [{ text: t.text }];
@@ -133,12 +130,30 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
     }
     return { role: t.role === 'assistant' ? 'model' : 'user', parts };
   });
+  if (!system || !/^(?:models\/)?gemma-[123]-/i.test(model)) return { contents, systemInstruction: system };
+  const instruction = { text: String(system) };
+  const first = contents.find((turn) => turn.role === 'user');
+  if (first) first.parts.unshift(instruction);
+  else contents.unshift({ role: 'user', parts: [instruction] });
+  return { contents };
+}
+
+// Same contract as streamAnthropic: signal aborts the losing lane, json asks
+// for a JSON object, onUsage settles the spend ledger, assignment refuses a
+// truncated reply. Until 2026-09-30 all four were dropped on the floor here,
+// so a Gemini-key assignment run could neither cancel nor settle.
+async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, signal, json, onUsage, assignment }) {
+  if (DEBUG) console.log('[DEBUG LLM] streamGemini called', { model, hasImage: !!imageDataUrl, maxTokens });
+  const { GoogleGenAI } = require('@google/genai');
+  const ai = new GoogleGenAI({ apiKey });
+  const { contents, systemInstruction } = geminiContents(turns, imageDataUrl, system, model);
   if (DEBUG) console.log('[DEBUG LLM] streamGemini sending request to Google SDK with contents count:', contents.length);
   try {
-    const config = { systemInstruction: system };
+    const config = { systemInstruction };
     if (signal) config.abortSignal = signal;
     if (maxTokens) config.maxOutputTokens = Math.max(Number(maxTokens) || 0, 1024);
-    if (json) config.responseMimeType = 'application/json';
+    // Gemma follows the JSON format requested by the prompt.
+    if (json && !/^(?:models\/)?gemma-/i.test(model)) config.responseMimeType = 'application/json';
     // Flash thinks by default and the thinking is paid in silence before the
     // first token (completeGemini already turns it off, 2026-09-15). The chat
     // panel and other stream callers get the same rule; an assignment lane
@@ -175,21 +190,13 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
 async function completeGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, json, onDelta, signal }) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
-  const contents = turns.map((t, i) => {
-    const last = i === turns.length - 1;
-    const parts = [{ text: t.text }];
-    if (last && imageDataUrl && t.role === 'user') {
-      const img = stripDataUrl(imageDataUrl);
-      if (img) parts.push({ inlineData: { mimeType: img.mime, data: img.b64 } });
-    }
-    return { role: t.role === 'assistant' ? 'model' : 'user', parts };
-  });
+  const { contents, systemInstruction } = geminiContents(turns, imageDataUrl, system, model);
   // Gemini 3.x Flash thinks by default and the thinking counts against
   // maxOutputTokens: a 400-token budget came back as an EMPTY reply on every
   // guide step (2026-09-15). Thinking off for Flash, and a floor on the budget.
-  const config = { systemInstruction: system, maxOutputTokens: Math.max(Number(maxTokens) || 0, 1024), temperature: 0.2 };
+  const config = { systemInstruction, maxOutputTokens: Math.max(Number(maxTokens) || 0, 1024), temperature: 0.2 };
   if (/flash/i.test(String(model))) config.thinkingConfig = { thinkingBudget: 0 };
-  if (json) config.responseMimeType = 'application/json';
+  if (json && !/^(?:models\/)?gemma-/i.test(model)) config.responseMimeType = 'application/json';
   if (signal) config.abortSignal = signal;
   // A caller that can use text as it arrives (the guide speaks sentences
   // while the tags are still being written) gets the stream; the same config.
@@ -260,13 +267,11 @@ function publikLLM() {
   };
 }
 
-// Nvidia's OpenAI-compatible endpoint. Nemotron models think before answering unless told not to
-// (reasoning_effort defaults to "high" there): slower asks, and the key Test's 8-token budget
-// would be spent on thinking. Other Nvidia models refuse fields they do not list, so only
-// Nemotron gets it.
+// The built-in Nemotron preset accepts reasoning_effort and uses it to keep
+// quick asks responsive. Other models receive their provider's standard fields.
 const NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1';
 function nvidiaArgs(args) {
-  const extra = /nemotron/i.test(String(args.model || '')) ? { reasoning_effort: 'none' } : undefined;
+  const extra = args.model === NVIDIA_VISION ? { reasoning_effort: 'none' } : undefined;
   return { ...args, baseURL: NVIDIA_BASE_URL, extra };
 }
 
@@ -277,13 +282,17 @@ function createLLM(settings, opts = {}) {
   // KAASHIFY_COMPANION_CLAUDE_API=1 (launch-day1.ps1 -ClaudeApi): Claude through the
   // ANTHROPIC_API_KEY already in the environment, whatever the settings say.
   // Opt-in because it spends API credits; the key is never written to settings.
-  const envClaude = process.env.KAASHIFY_COMPANION_CLAUDE_API === '1' && !!process.env.ANTHROPIC_API_KEY;
+  const envClaude = !opts.ownKey && process.env.KAASHIFY_COMPANION_CLAUDE_API === '1' && !!process.env.ANTHROPIC_API_KEY;
   if (!envClaude && !opts.ownKey && publik && publik.active()) return publikLLM()(settings);
   const provider = envClaude ? 'anthropic' : settings.provider;
   const keys = settings.apiKeys || {};
   const apiKey = envClaude ? process.env.ANTHROPIC_API_KEY : keys[provider];
   const tier = settings.smart ? 'smart' : 'fast';
-  const model = envClaude ? (process.env.KAASHIFY_COMPANION_CLAUDE_MODEL || 'claude-sonnet-5') : (settings.models[provider] || {})[tier];
+  const model = envClaude ? (process.env.KAASHIFY_COMPANION_CLAUDE_MODEL || 'claude-sonnet-5') : selectModel(settings, provider, tier);
+  const requestModel = (params) => envClaude ? params.model || model : selectModel(settings, provider, tier, {
+    image: Boolean(params.imageDataUrl),
+    override: params.model,
+  });
 
   // Set to 4096 (effectively unlimited for a single response) 
   // since some SDKs like Anthropic require a maxTokens value.
@@ -296,8 +305,8 @@ function createLLM(settings, opts = {}) {
     ready: !!apiKey && !!model,
     async stream(params) {
       if (DEBUG) console.log('[DEBUG LLM] stream() invoked for provider:', provider);
-      const args = { apiKey, model, maxTokens, ...paramsWithComputer(params) };
-      if (provider === 'openai') return streamOpenAI(args);
+      const args = { apiKey, maxTokens, ...paramsWithComputer(params), model: requestModel(params) };
+      if (provider === 'openai') return streamOpenAI({ ...args, nativeOpenAI: true });
       if (provider === 'nvidia') return streamOpenAI(nvidiaArgs(args));
       if (provider === 'anthropic') return streamAnthropic(args);
       if (provider === 'gemini') return geminiStream(args);
@@ -307,10 +316,10 @@ function createLLM(settings, opts = {}) {
       // params.model: one call on another model of the same provider (a problem
       // walkthrough wants the smart tier). Unset leaves the configured one.
       // params.onDelta: streamed text for callers that can use it as it arrives.
-      const args = { apiKey, maxTokens: params.maxTokens || 512, ...paramsWithComputer(params), model: params.model || model, onToken: params.onToken || params.onDelta || (() => {}) };
+      const args = { apiKey, maxTokens: params.maxTokens || 512, ...paramsWithComputer(params), model: requestModel(params), onToken: params.onToken || params.onDelta || (() => {}) };
       if (provider === 'gemini') return geminiComplete(args);
       // The other SDKs stream fine; collect and return.
-      if (provider === 'openai') return streamOpenAI(args);
+      if (provider === 'openai') return streamOpenAI({ ...args, nativeOpenAI: true });
       if (provider === 'nvidia') return streamOpenAI(nvidiaArgs(args));
       if (provider === 'anthropic') return streamAnthropic(args);
       throw new Error('unknown provider: ' + provider);

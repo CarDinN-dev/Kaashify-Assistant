@@ -449,7 +449,9 @@ class Assignment {
     this.solving++;
     this.inFlightText = o.text || '';
     const current = () => gen === this.gen && !ctl.signal.aborted;
-    const rec = { at: started, changeSeenAt: o.changeSeenAt || started, auto: !!o.auto, question: o.question || '', lookMs: o.lookMs ?? null, capMs: o.capMs || 0, ocrMs: o.ocrMs ?? null, jevMs: o.jevMs ?? null, blockMs: o.blockMs ?? null, fastFirstTokenMs: null, fastAnswerMs: null, checkerFirstStepMs: null, checkerMs: null, agreed: null, cacheHit: false, fastModel: this.d.fastModel, checkerModel: this.d.checkerModel || 'claude-sonnet-5' };
+    const fastModel = this.d.modelForLane?.('fast') ?? this.d.fastModel;
+    const checkerModel = this.d.modelForLane?.('checker') ?? this.d.checkerModel ?? 'claude-sonnet-5';
+    const rec = { at: started, changeSeenAt: o.changeSeenAt || started, auto: !!o.auto, question: o.question || '', lookMs: o.lookMs ?? null, capMs: o.capMs || 0, ocrMs: o.ocrMs ?? null, jevMs: o.jevMs ?? null, blockMs: o.blockMs ?? null, fastFirstTokenMs: null, fastAnswerMs: null, checkerFirstStepMs: null, checkerMs: null, agreed: null, cacheHit: false, fastModel, checkerModel };
     this.d.send('guide:state', { state: 'reading', task: 'solve' });
     let firstStep = false, result;
     try {

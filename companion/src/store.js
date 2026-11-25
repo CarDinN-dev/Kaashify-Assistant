@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const { app, safeStorage } = require('electron');
+const { DEFAULT_MODELS, MODEL_SLOTS } = require('./models');
 const { replaceProfileFile, canEncrypt } = require('../../src/profile-file');
 
 // Companion settings now live under the desktop app's userData folder.
@@ -123,18 +124,7 @@ const DEFAULTS = {
   // that choice persists until the user turns it back on.
   companionEnabled: true,
   apiKeys: { openai: '', anthropic: '', gemini: '', nvidia: '', typesafe: '' },
-  models: {
-    openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o' },
-    anthropic: { fast: 'claude-haiku-4-5', smart: 'claude-sonnet-5' },
-    // 2026-09-15: gemini-2.5-* returns 404 "no longer available to new users".
-    gemini: { fast: 'gemini-3.6-flash', smart: 'gemini-3.6-pro' },
-    // 2026-11-22 (a user report: Gemini and Nvidia keys both failed): Nvidia
-    // ended the Llama 3.2 vision models, the 90b on 2026-11-16 (410 Gone, "reached its end of
-    // life"), the 11b before it, so every ask on an Nvidia key failed. Nemotron 3.5 Super VL is
-    // Nvidia's own vision model (GA 2026-10-15, no end date listed); both tiers use it. It thinks
-    // by default, so llm.js sends reasoning_effort "none" with it (nvidiaArgs).
-    nvidia: { fast: 'nvidia/nemotron-3.5-super-vl-120b-a12b', smart: 'nvidia/nemotron-3.5-super-vl-120b-a12b' }
-  }
+  models: DEFAULT_MODELS,
 };
 
 // Model IDs age out, and a saved settings file beats DEFAULTS on merge (save()
@@ -158,9 +148,12 @@ function retireDeadModels(settings) {
   for (const provider of Object.keys(RETIRED_MODELS)) {
     const tiers = settings.models && settings.models[provider];
     if (!tiers) continue;
-    for (const tier of ['fast', 'smart']) {
+    for (const tier of MODEL_SLOTS) {
       const replacement = RETIRED_MODELS[provider][tiers[tier]];
-      if (replacement) { tiers[tier] = replacement; changed = true; }
+      if (typeof replacement === 'string') {
+        settings.models = { ...settings.models, [provider]: { ...settings.models[provider], [tier]: replacement } };
+        changed = true;
+      }
     }
   }
   return changed;

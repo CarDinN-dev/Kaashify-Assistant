@@ -2,6 +2,7 @@
 // no audio API; we transcribe with whatever audio-capable key is available, and
 // fall back across providers. Returns { text, provider } or { text:'', error }.
 const { pcmToWav } = require('./wav');
+const { DEFAULT_MODELS } = require('./models');
 
 async function transcribeOpenAI(apiKey, wav, model) {
   const OpenAI = require('openai');
@@ -12,9 +13,8 @@ async function transcribeOpenAI(apiKey, wav, model) {
   return (res.text || '').trim();
 }
 
-// The transcription model follows the store's fast Gemini model, so it retires
-// with it: gemini-2.5-flash returns 404 for new users (2026-09-15).
-const DEFAULT_GEMINI_STT_MODEL = 'gemini-3.6-flash';
+// Use the built-in audio-capable model for fallback transcription. Chat models can be text-only.
+const DEFAULT_GEMINI_STT_MODEL = DEFAULT_MODELS.gemini.fast;
 async function transcribeGemini(apiKey, wav, model) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
@@ -43,8 +43,7 @@ function createSTT(settings) {
     } });
   }
   if (keys.openai) chain.push({ p: 'openai', fn: (wav) => transcribeOpenAI(keys.openai, wav, settings.sttModel) });
-  const geminiModel = (settings.models && settings.models.gemini && settings.models.gemini.fast) || DEFAULT_GEMINI_STT_MODEL;
-  if (keys.gemini && process.env.KAASHIFY_NO_GEMINI !== '1') chain.push({ p: 'gemini', fn: (wav) => transcribeGemini(keys.gemini, wav, geminiModel) });
+  if (keys.gemini && process.env.KAASHIFY_NO_GEMINI !== '1') chain.push({ p: 'gemini', fn: (wav) => transcribeGemini(keys.gemini, wav, DEFAULT_GEMINI_STT_MODEL) });
 
   return {
     available: chain.length > 0,

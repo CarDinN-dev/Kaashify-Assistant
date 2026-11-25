@@ -43,6 +43,7 @@ const secrets = require('./secrets');
 const sttLocal = require('./stt-local');
 const { open, api, setSaveStateListener } = require('./db');
 const { createLLM } = require('../companion/src/llm');
+const { MODEL_SLOTS, isModelProvider, modelSettingsPatch } = require('../companion/src/models');
 const routines = require('../companion/src/reflex/routines');
 const { INTENTS } = require('../companion/src/reflex/router');
 const { normalizeFeeds } = require('../companion/src/reflex/focus-guard');
@@ -123,7 +124,7 @@ const autostart = createAutostart({ app, log: m => console.log(m) });
 function applyAutostart(on) { autostart.apply(on); }
 function settingsPatch(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid settings.');
-  const clean = {};
+  const clean = modelSettingsPatch(patch);
   for (const key of ['openMic', 'persistTranscripts', 'saveAudio', 'speakReplies', 'smart', 'proactive', 'hideFromCapture', 'sounds', 'focusGuard', 'tasks', 'hands', 'knotIsland']) if (typeof patch[key] === 'boolean') clean[key] = patch[key];
   // Draw on the screen (0.1.38): answers about the screen mark what they talk about.
   if (typeof patch.drawOnScreen === 'boolean') clean.drawOnScreen = patch.drawOnScreen;
@@ -150,7 +151,7 @@ function settingsPatch(patch) {
     const keys = { ...current.apiKeys, ...clean.apiKeys };
     const providers = ['gemini', 'anthropic', 'nvidia', 'openai'];
     const added = providers.find(provider => clean.apiKeys[provider]);
-    if (added === 'gemini' || !keys[current.provider]) {
+    if (!clean.provider && (added === 'gemini' || !keys[current.provider])) {
       clean.provider = providers.find(provider => keys[provider]) || current.provider;
     }
   }
@@ -184,7 +185,7 @@ async function testKeys(which) {
     // ownKey: test the key itself, even while publik answers the asks (0.1.36; it pinged publik).
     const llm = createLLM({ ...s, provider, smart: false }, { ownKey: true });
     if (!llm.ready) return { error: 'no key' };
-    const text = await llm.complete({ system: 'Reply with exactly the word OK.', turns: [{ role: 'user', text: 'ping' }], maxTokens: 8 });
+    const text = await llm.complete({ system: 'Reply with exactly the word OK.', turns: [{ role: 'user', text: 'ping' }], maxTokens: 1024 });
     return /^ok[.!]*$/i.test(String(text ?? '').trim()) ? { ok: true } : { error: 'The provider returned an unexpected test response.' };
   };
   const tests = {
@@ -205,6 +206,32 @@ async function testKeys(which) {
   for (const k of names) { out[k] = await tests[k](); out[k].error = scrub(out[k].error, keys); if (!out[k].ok && out[k].error) out[k].message = getStarted.plainKeyError(k, out[k].error); }
   return out;
 }
+// Only this generated swatch is sent by the screen model check.
+const MODEL_TEST_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwBfH/pjERIbw4xAGC3Cbs/bXDRc0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa8NgFD/zhh3sicN8AAAAASUVORK5CYII=';
+
+async function testModel(request) {
+  const { provider, slot, modelId, smart } = request || {};
+  if (!isModelProvider(provider) || !MODEL_SLOTS.includes(slot) || typeof modelId !== 'string') throw new Error('Invalid model selection.');
+  const settings = store.getSettings();
+  const patch = modelSettingsPatch({ models: { [provider]: { [slot]: modelId } } });
+  const models = { ...settings.models, [provider]: { ...settings.models?.[provider], ...patch.models[provider] } };
+  const llm = createLLM({ ...settings, provider, smart: slot === 'smart' || (slot === 'vision' && smart === true), models }, { ownKey: true });
+  if (!llm.ready) return { ok: false, error: 'Save a key for this provider before testing the model.' };
+  const image = slot === 'vision';
+  const result = await timed(async () => {
+    const text = await llm.complete({
+      system: 'Follow the user’s requested response format.',
+      turns: [{ role: 'user', text: image ? 'What color is the image? Answer in one word.' : 'Reply with exactly the word OK.' }],
+      imageDataUrl: image ? MODEL_TEST_IMAGE : undefined,
+      maxTokens: 1024,
+      signal: AbortSignal.timeout(15000),
+    });
+    const pass = (image ? /^(?:magenta|purple|fuchsia|pink)[.!]*$/i : /^ok[.!]*$/i).test(String(text || '').trim());
+    return pass ? { ok: true } : { error: image ? 'The model could not identify the color in the sample image.' : 'The model returned an unexpected text response.' };
+  });
+  return { ...result, error: scrub(result.error, Object.values(settings.apiKeys || {})) };
+}
+
 // Get started, step 1. Claude Code: one real answer through the pool proves it
 // is installed and signed in. Gemini: the pasted key answers one word before it
 // is saved, so a bad key never becomes the answer source.
@@ -254,6 +281,7 @@ function registerHomeIpc() {
   });
   handle('home:my-kaashify', () => companion.myKaashify());
   handle('home:keys:test', which => testKeys(String(which || '')));
+  handle('home:models:test', testModel);
   // The tour (companion/src/tour.js): where it stands, start it, or skip it for good.
   handle('home:tasks:list', () => companion.tasksHome());
   handle('home:task:action', p => companion.taskAction(p));
