@@ -1,10 +1,11 @@
-// Downloads the whisper.cpp Windows binary and the base English model for local voice.
+// Downloads the Windows speech recognizer, transcription model, and bundled reply voice.
 // Usage: npm run setup:voice [-- --small]
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { createVoice } = require('../companion/src/voice');
 
 const WHISPER_TAG = 'b4938';
 const BIN_URL = `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_TAG}/whisper-bin-x64.zip`;
@@ -93,6 +94,18 @@ async function main() {
   const modelPath = path.join(modelDir, path.basename(new URL(modelUrl).pathname));
   if (!fs.existsSync(modelPath)) await download(modelUrl, modelPath);
   console.log(`Model ready: ${modelPath}`);
+
+  const voice = createVoice({
+    userData: path.join(root, 'vendor'),
+    settings: { get: () => ({ voice: 'fable' }) },
+    bundled: [],
+    log: console.log,
+  });
+  if (!voice.status().installed) {
+    console.log('Downloading the bundled Fable reply voice.');
+    await voice.install('fable');
+  }
+  console.log(`Reply voice ready: ${voice.modelDir()}`);
   console.log('Voice setup complete.');
 }
 
