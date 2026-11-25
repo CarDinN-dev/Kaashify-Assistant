@@ -16,7 +16,7 @@ test('interrupting a long spoken answer clears the echo gate and takes desktop m
   const ctx = { win: { isDestroyed: () => false, isVisible: () => true }, OPEN_MIC: true, ptt: { held: false }, state: {}, guide: null,
     speakMuteUntil: Date.now() + 60000, hooks: { onVoiceTakeover: () => takeovers++ },
     getReflex: () => ({ enabled: () => true, warm() {} }), getListener: () => ({ available: true, reset() { resets++; } }), warmGuideBrain() {},
-    send: (c,p) => sent.push([c,p]), probeReady: () => false, setTimeout: () => 1, OPEN_MIC_MAX_MS: 180000, Date, speechTurn: 4, startMacReleaseWatch() {} };
+    send: (c,p) => sent.push([c,p]), probeReady: () => false, setTimeout: () => 1, OPEN_MIC_MAX_MS: 180000, Date, speechTurn: 4, startMacReleaseWatch() {}, typingOwnsMic: () => false };
   vm.runInNewContext(body + ';pttStart();', ctx);
   assert.equal(ctx.speakMuteUntil, 0); assert.equal(ctx.ptt.held, true);
   assert.equal(takeovers, 1); assert.equal(resets, 1);

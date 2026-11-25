@@ -102,8 +102,8 @@ test('cues.js plays the six as buffers through their own gain, never over the mi
 
 test('the renderer puts each cue at its moment', () => {
   const r = fs.readFileSync(path.join(dir, 'renderer.js'), 'utf8');
-  assert.match(r, /if \(pttHeld\) cues\.play\('press', \{ force: true \}\);/, 'press as the mic opens, after quiet()');
-  assert.ok(r.indexOf("cues.quiet();\n    if (pttHeld) cues.play('press'") > 0, 'quiet first, then the pop');
+  assert.match(r, /if \(pttHeld && id == null\) cues\.play\('press', \{ force: true \}\);/, 'the talk key cues on press and hands-free dictation starts quietly');
+  assert.ok(r.indexOf("cues.quiet();\n    if (pttHeld && id == null) cues.play('press'") > 0, 'quiet first, then the pop');
   assert.match(r, /ack\(\{ silent: true \}\);\s*cues\.play\('release'\);/, 'release at key up, the ack motif silent there');
   assert.match(r, /if \(handsState\.active && !was\) \{ handsSince = Date\.now\(\); cues\.play\('hands-start'\); \}/);
   assert.match(r, /cues\.play\('hands-stop'\);\s*if \(Date\.now\(\) - handsSince > KSPEC\.character\.cues\.longRunMs\) setTimeout\(\(\) => cues\.play\('done-notes'\), 450\);/);

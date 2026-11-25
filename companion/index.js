@@ -83,6 +83,7 @@ const { macChordMods, watchChordRelease } = require('./src/voice/mac-release');
 // The Mac's words for what this process sends and what the model reads (renderer/mac-words.js).
 const MacWords = require('./renderer/mac-words.js');
 const Dictate = require('./src/dictate');
+const { createDictationSession, typingCommand } = require('./src/dictation-session');
 const assignmentCapturer = createCaptureClient({ nativeImage, log: m => console.log('[assignment] ' + m) });
 const captureAssignmentDisplay = (displayId, opts) => assignmentCapturer.capture(displayId, opts);
 app.on('before-quit', () => assignmentCapturer.close());
@@ -195,6 +196,7 @@ function send(channel, data) {
   if (IS_MAC && data && typeof data === 'object' && channel !== 'llm:token' && channel !== 'llm:done') data = MacWords.uiText(data);
   // The tour's guide card waits for a real guide step to reach the screen.
   if (channel === 'guide:target' && tour && tour.step === Tour.STEP.guide && !tour.shown && data && data.task === 'guide') tourTargetShown();
+  if (channel === 'guide:say' && ptt.sessionMicId != null) return;
   if (channel === 'guide:say' && data && data.stream) {
     if (data.first) { speechOwner.set(data.stream, speechTurn); if (speechOwner.size > 40) speechOwner.delete(speechOwner.keys().next().value); }
     else if (speechOwner.get(data.stream) !== speechTurn) return;
@@ -407,6 +409,9 @@ function createOverlayWindow() {
   // A click on Kaashify makes the overlay the foreground window: the one
   // moment a stripped always-on-top bit can be put back (see reassertTopmost).
   win.on('focus', reassertTopmost);
+  win.on('hide', () => typingSession.stop('hidden'));
+  win.on('closed', () => typingSession.stop('hidden'));
+  win.webContents.on('did-start-loading', () => typingSession.stop('hidden'));
 
   applyCapturePolicy();
   if (process.platform === 'darwin') {
@@ -452,7 +457,10 @@ function createOverlayWindow() {
     // Give the desktop a moment to push its semester snapshot, then speak first.
     setTimeout(maybeSendDailyLine, 3000);
   });
-  win.webContents.on('render-process-gone', (_e, d) => console.log('[kaashify] overlay renderer gone', JSON.stringify(d)));
+  win.webContents.on('render-process-gone', (_e, d) => {
+    typingSession.stop('hidden');
+    console.log('[kaashify] overlay renderer gone', JSON.stringify(d));
+  });
 }
 
 // -------- audio retention (opt-in) --------
@@ -583,6 +591,7 @@ function setCapturing(active) {
       return false;
     }
   }
+  if (active) typingSession.stop('meeting');
   state.capturing = active;
   const settings = store.getSettings();
   if (active) {
@@ -1606,7 +1615,9 @@ function registerIpc() {
   companionIpc.handle('companion:deep:query', (_e, text) => runDeepQuery(text));
   companionIpc.on('companion:ask', (_e, payload) => runFeature(payload.mode, payload.text));
   companionIpc.on('companion:mic:pcm', (_e, arrayBuffer) => { if (state.capturing) buffers.you.push(Buffer.from(arrayBuffer)); });
-  companionIpc.on('companion:ptt:pcm', (_e, arrayBuffer) => {
+  companionIpc.on('companion:dictation:mic-failed', (_e, id) => typingSession.microphoneFailed(id));
+  companionIpc.on('companion:ptt:pcm', (_e, arrayBuffer, dictationId) => {
+    if (dictationId != null) { typingSession.push(dictationId, arrayBuffer); return; }
     // A dictation holds the mic on its own: its words never reach the talk key's ears.
     if (dict.held) { dict.chunks.push(Buffer.from(arrayBuffer)); return; }
     if (!ptt.held) return;
@@ -1667,6 +1678,7 @@ function registerIpc() {
   companionIpc.on('companion:guide:dismiss', (_e, p) => {
     fileContext = null;
     const reason = (p && p.reason) || 'renderer';
+    if (reason === 'esc' && stopTypingFromEscape()) return;
     if (activeNudge) { endNudge(reason); return; }
     if (agent && agent.active()) {
       // OK on the previous task's done bubble, clicked after the next task
@@ -1735,6 +1747,7 @@ function registerIpc() {
     if (p && p.action === 'copy-rewrite') { if (lastRewrite) { clipboard.writeText(lastRewrite); flash('Copied.', 1800); } guideDismiss('copied'); return; }
     if (p && p.action) { if (guide) guide.onAction(String(p.action)); return; }
     if (p && p.text && p.text.trim()) {
+      if (!p.about && handleTypingCommand(p.text, 'typed')) return;
       if (supportCommand(p.text)) return;
       // "Move to the top left": Kaashify itself is being sent somewhere.
       { const sc = selfCommands(p.text, splitClauses); if (sc && !sc.rest) { runSelfCommands(sc.cmds); return; } }
@@ -1752,7 +1765,8 @@ function registerIpc() {
       // round trip, and until it returns Kaashify used to sit silent.
       const wasActive = !!(guide && guide.active());
       if (!wasActive) send('guide:state', { state: 'thinking', task: 'guide' });
-      if (await assignmentRoute(p.text, p.source || 'typed')) { if (!wasActive) restoreKnotState(); return; }
+      const localLaunch = !p.about && !wasActive && reflex?.enabled() && reflex.exactLaunchApp(p.text);
+      if (!localLaunch && await assignmentRoute(p.text, p.source || 'typed')) { if (!wasActive) restoreKnotState(); return; }
       if (state.busy) { send('llm:busy', {}); restoreKnotState(); return; }
       if (p.about && selection) { answerSelection(p.text); return; }
       // The reflex branch below goes through routeUtterance, which notes the ask itself.
@@ -3590,13 +3604,13 @@ function getListener() {
       userData: app.getPath('userData'),
       log: (m) => console.log(m),
       onCommand: (text, meta) => {
-        if (!ptt.held || !earlyVoiceCommand(text)) return false;
+        if (!ptt.held || ptt.sessionStart || !earlyVoiceCommand(text)) return false;
         heardSegment(text);
         ptt.finals++;
         routeUtterance(text, 'voice', meta.heardAt, meta.seg);
         return true;
       },
-      onPartial: (text, meta) => { showHeard(text); if (ptt.heldText || heardBack(text) || selection || assignment?.isOn() || classifyAsk(text, false)) return; if (parseRecallAsk(text)) { warmRecallBrain(); return; } earlyGuideRead(text, 'voice'); if (!state.busy && !ownPath(text) && !handsClaims(text) && !handsFollowUp(text) && !(agent && agent.active())) getReflex().handle(text, { final: false, uttId: meta && meta.seg, keyed: !OPEN_MIC }).catch(() => {}); },
+      onPartial: (text, meta) => { showHeard(text); if (ptt.heldText || heardBack(text) || typingCommand(text) || ptt.sessionStart || selection || assignment?.isOn() || classifyAsk(text, false)) return; if (parseRecallAsk(text)) { warmRecallBrain(); return; } earlyGuideRead(text, 'voice'); if (!state.busy && !ownPath(text) && !handsClaims(text) && !handsFollowUp(text) && !(agent && agent.active())) getReflex().handle(text, { final: false, uttId: meta && meta.seg, keyed: !OPEN_MIC }).catch(() => {}); },
       // Names whisper should know: the product, and the people and courses in memory.
       vocabulary: () => whisperVocabulary(),
       // The optional engine for finished sentences; nothing changes until it is on and loaded.
@@ -3622,6 +3636,7 @@ function joinFinal(text, meta) {
   clearTimeout(ptt.midTimer); ptt.midTimer = null;
   heardSegment(text);
   ptt.finals++;
+  if (ptt.sessionStart) return;
   const reason = meta && meta.reason;
   const held = ptt.heldText;
   const joined = held ? held.text + ' ' + text : text;
@@ -3785,6 +3800,7 @@ async function pttPressMac() {
   if (ok) pttStart();
 }
 function pttStart() {
+  if (typingOwnsMic()) return;
   if (!win || win.isDestroyed() || !win.isVisible()) return;
   // Open mic: a held chord auto-repeats about 30 times a second, and each
   // repeat used to count as a fresh press, so holding the keys opened and
@@ -3814,6 +3830,7 @@ function pttStart() {
   ptt.chunks = [];
   ptt.startedAt = Date.now();
   ptt.finals = 0;
+  ptt.sessionStart = false;
   // Pressed again while a final waits for the rest of its phrase: this press is
   // the rest. Otherwise a new press starts clean.
   if (ptt.midTimer) { clearTimeout(ptt.midTimer); ptt.midTimer = null; } else ptt.heldText = null;
@@ -3865,6 +3882,7 @@ async function pttStop(reason) {
   const tap = Boolean(ptt.chord) && reason === 'release' && keyUpAt - ptt.startedAt < PTT_TAP_MS && !ptt.heard && !ptt.lastPartial;
   if (tap) {
     ptt.chunks = [];
+    ptt.sessionStart = false;
     if (ptt.streaming) { ptt.streaming = false; try { getListener().reset(); } catch (_) { /* nothing was heard */ } }
     routeLog('tap ' + (keyUpAt - ptt.startedAt) + 'ms, dropped');
     restoreKnotState();
@@ -3890,6 +3908,14 @@ async function pttStop(reason) {
     sayNeutral(heardText(ptt.lastPartial), keyUpAt);
     ptt.flushing = true;
     try { await getListener().flush(); } catch (e) { console.log('[listen] ' + e.message); } finally { ptt.flushing = false; }
+    if (ptt.press === press && ptt.sessionStart) {
+      ptt.sessionStart = false;
+      clearTimeout(ptt.midTimer);
+      ptt.midTimer = null;
+      ptt.heldText = null;
+      handleTypingCommand('start typing', 'voice');
+      return;
+    }
     await hearWholePress(pcm, press);
     routeHeldOnRelease();
     if (!ptt.finals) { flash(PTT_MISSED, 3000); restoreKnotState(); }
@@ -3909,6 +3935,81 @@ async function pttStop(reason) {
   if (!text && res && res.error) routeLog('ptt: transcription failed via ' + (res.error.provider || '?') + ': ' + String(res.error.message || '').slice(0, 200));
   if (!text) { flash(res && res.error ? (IS_MAC ? MAC_STT_FAILED : 'Transcription failed: ' + String(res.error.message || '').slice(0, 200)) : 'I did not catch that.', 3500); restoreKnotState(); return; }
   routeUtterance(text, 'voice');
+}
+
+// Hands-free dictation shares the local speech engines and mic, with a
+// separate transcript stream that never goes through the command router.
+const typingSession = createDictationSession({
+  selfPid: process.pid,
+  focus: async ({ starting = false } = {}) => {
+    const read = () => probe?.request('focus.text', { ignorePid: process.pid }, 750);
+    const f = await read();
+    if (!starting || !f?.ours) return f;
+    // Quick Ask has just released its keyboard focus back to Windows.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return read();
+  },
+  foreground: async () => probe?.request('fg', {}, 750),
+  paste: (target, text) => getHands().request('keys.text', {
+    hwnd: target.hwnd, targetPid: target.pid, text, selfPid: process.pid, strictForeground: true, deadline: Date.now() + 1000,
+  }, 3500),
+  listener: (onFinal) => {
+    const finalEngine = getParakeet();
+    finalEngine.warm();
+    return createListener({ userData: app.getPath('userData'), finalEngine, vocabulary: whisperVocabulary, onFinal });
+  },
+  onState: ({ state: phase, reason, id }) => {
+    const active = phase === 'active';
+    if (active || ptt.sessionMicId != null) ptt.dictating = active;
+    if (active) {
+      hushSpeech('dictation');
+      hooks.onVoiceTakeover?.();
+      send('guide:hint', { text: ' ', ms: 60, live: true });
+      ptt.sessionMicId = id;
+      send('ptt:state', { held: true, dictationId: id });
+      send('guide:state', { state: 'listening', task: 'guide' });
+    } else if (ptt.sessionMicId) {
+      ptt.sessionMicId = null;
+      send('ptt:state', { held: false, closeMic: true });
+      restoreKnotState();
+    } else if (reason !== 'hidden') restoreKnotState();
+    send('dictation:state', { phase, reason });
+    if (phase === 'idle' && !harness.active && !selection && !tasksPanelOpen && !(agent && agent.active()) && !(guide && guide.active())) disarmEsc();
+  },
+});
+app.on('before-quit', () => typingSession.stop('hidden'));
+
+function typingOwnsMic() { return typingSession.state() === 'active' || typingSession.state() === 'starting'; }
+
+function handleTypingCommand(text, source) {
+  const command = typingCommand(text);
+  if (!command) return false;
+  if (source !== 'typed' && source !== 'voice') return false;
+  if (openMicSource(source)) {
+    if (!ptt.held) restoreKnotState();
+    return true;
+  }
+  if (command === 'stop') {
+    ptt.sessionStart = false;
+    reflex?.clearCarry();
+    if (!typingSession.stop()) { flash('No hands-free dictation is running.', 3000); restoreKnotState(); }
+    return true;
+  }
+  if (!STANDALONE || process.platform !== 'win32' || !probeReady()) {
+    flash('Hands-free dictation needs the Windows desktop helper.', 4000);
+    restoreKnotState();
+  } else if (source === 'voice' && (ptt.held || ptt.flushing)) {
+    ptt.sessionStart = true;
+  } else if (state.capturing || ptt.held || ptt.flushing || dict.held || dict.busy || tour || agent?.active()) {
+    flash('Finish your current voice session or task, then start typing.', 4000);
+    restoreKnotState();
+  } else if (!typingOwnsMic() && win && !win.isDestroyed() && win.isVisible()) {
+    reflex?.clearCarry();
+    if (win.isFocused()) win.blur();
+    armEsc();
+    void typingSession.start();
+  }
+  return true;
 }
 
 // -------- dictation: hold Ctrl + Win, speak, let go --------
@@ -3965,7 +4066,7 @@ const DICT_GATE_RETRY_MS = 200;   // a browser that was asked for the first time
 const DICT_NUDGE_MS = 1500;       // a hold this long with no text box was a real try: say why nothing happened
 const DICT_NUDGE_MAX = 3;         // per run; after that the person knows
 async function dictGate() {
-  if (dict.held || dict.busy || dict.gate || !dictationOn()) return;
+  if (typingOwnsMic() || dict.held || dict.busy || dict.gate || !dictationOn()) return;
   const g = dict.gate = { at: Date.now(), verdict: null, blocked: false };
   let verdict = { text: 'unknown', why: 'no probe' };
   if (probeReady()) {
@@ -3998,7 +4099,7 @@ function dictRelease(reason) {
 }
 
 function dictStart(gate) {
-  if (dict.held || dict.busy || !dictationOn()) return;
+  if (typingOwnsMic() || dict.held || dict.busy || !dictationOn()) return;
   if (!win || win.isDestroyed()) return;
   if (state.capturing) { flash('Listening to a meeting right now. Stop that first to dictate.', 3500); return; }
   dict.held = true;
@@ -4717,6 +4818,7 @@ async function routeUtterance(text, source, heard, uttId, assignmentAlreadyCheck
   if (tour && tour.hear && String(text || '').trim()) { tourHeard(text, source); return; }
   // Kaashify's own line heard back is nobody's ask. With a card up, words answer the card.
   if (source !== 'typed' && heardBack(text) && !(agent && agent.asking())) { routeLog('heard back, nothing: "' + String(text).slice(0, 40) + '"'); restoreKnotState(); return; }
+  if (handleTypingCommand(text, source) || typingOwnsMic()) return;
   // While Hands runs, its words are a card answer, a stop or a wait; nothing
   // else may act on the screen under it. A task of several steps goes to
   // Hands whole, before the reflex layer can fire its first clause alone.
@@ -4775,7 +4877,8 @@ async function routeUtterance(text, source, heard, uttId, assignmentAlreadyCheck
   // Assignment mode first: its words ("homework mode", "walk me through this
   // problem") must not be acted on by the reflex layer or pointed at.
   assignmentHeardAt = heardAt;
-  if (!assignmentAlreadyChecked && await assignmentRoute(text, source || 'voice')) return;
+  const localLaunch = !openMicSource(source) && reflex?.enabled() && reflex.exactLaunchApp(text);
+  if (!localLaunch && !assignmentAlreadyChecked && await assignmentRoute(text, source || 'voice')) return;
   earlyGuideRead(text, source);
   const r = getReflex();
   const reading = Boolean(guide && guide.active() && !['pointing', 'explaining'].includes(guide.status().state));
@@ -5274,12 +5377,19 @@ function cursorBox(w, h) {
   const b = win.getBounds();
   return { x: p.x - b.x - w / 2, y: p.y - b.y - h / 2, w, h };
 }
+function stopTypingFromEscape() {
+  if (typingSession.state() === 'idle') return false;
+  ptt.sessionStart = false;
+  if (ptt.streaming || ptt.flushing) getListener().reset();
+  return typingSession.stop();
+}
+
 function armEsc() {
   if (harness.esc) return;
-  try { harness.esc = globalShortcut.register('Escape', () => { if (tour && tour.handsRunning) { tour.handsAbort = true; return; } if (tasksPanelOpen) { send('tasks:event', { type: 'esc' }); return; } if (agent && agent.active()) stopHands('esc'); else if (guide && guide.active()) guide.dismiss('esc'); else guideDismiss('esc'); }); } catch (_) { harness.esc = false; }
+  try { harness.esc = globalShortcut.register('Escape', () => { if (stopTypingFromEscape()) return; if (tour && tour.handsRunning) { tour.handsAbort = true; return; } if (tasksPanelOpen) { send('tasks:event', { type: 'esc' }); return; } if (agent && agent.active()) stopHands('esc'); else if (guide && guide.active()) guide.dismiss('esc'); else guideDismiss('esc'); }); } catch (_) { harness.esc = false; }
 }
 function disarmEsc() {
-  if (!harness.esc) return;
+  if (!harness.esc || typingSession.state() !== 'idle') return;
   try { globalShortcut.unregister('Escape'); } catch (_) { /* already gone */ }
   harness.esc = false;
 }

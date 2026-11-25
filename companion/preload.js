@@ -23,7 +23,8 @@ contextBridge.exposeInMainWorld('kaashify', {
   sparReset: () => ipcRenderer.invoke('companion:spar:reset'),
   deepQuery: (text) => ipcRenderer.invoke('companion:deep:query', text),
   micPcm: (arrayBuffer) => ipcRenderer.send('companion:mic:pcm', arrayBuffer),
-  pttPcm: (arrayBuffer) => ipcRenderer.send('companion:ptt:pcm', arrayBuffer),
+  pttPcm: (arrayBuffer, dictationId) => ipcRenderer.send('companion:ptt:pcm', arrayBuffer, dictationId),
+  dictationMicFailed: (id) => ipcRenderer.send('companion:dictation:mic-failed', id),
   systemPcm: (arrayBuffer) => ipcRenderer.send('companion:system:pcm', arrayBuffer),
   setIgnoreMouse: (v, why) => ipcRenderer.send('companion:mouse:ignore', v, why === 'pill' ? 'pill' : undefined),
   // The overlay took the mouse far from Kaashify, or Kaashify was dragged: for route.log.
@@ -60,7 +61,7 @@ contextBridge.exposeInMainWorld('kaashify', {
   assignmentBench: (payload) => ipcRenderer.invoke('companion:assignment:bench', payload),
   on: (channel, cb) => {
     const allowed = ['mouse:forced', 'capture:state', 'llm:start', 'llm:token', 'llm:done', 'llm:error', 'llm:busy', 'status', 'transcript', 'spar:state', 'cursor:probe', 'touchpad:event', 'knot:set', 'tour:start', 'daily:line', 'capture:limit', 'cursor:away',
-      'assignment:takeover', 'assignment:paint', 'assignment:voice', 'guide:state', 'guide:target', 'guide:update', 'guide:retract', 'guide:bubble', 'guide:done', 'guide:hint', 'guide:say', 'guide:circle', 'guide:marks', 'guide:marks:clear', 'voice:state', 'voice:hush', 'knot:corner', 'knot:pos', 'knot:move', 'knot:size', 'knot:island', 'hands:state', 'tasks:event', 'tasks:windows', 'tour:card', 'tour:update', 'tour:end', 'knot:backdrop', 'power:state', 'ptt:state', 'settings:changed', 'capture:policy', 'focus:guard', 'play:start', 'quick:open'];
+      'assignment:takeover', 'assignment:paint', 'assignment:voice', 'guide:state', 'guide:target', 'guide:update', 'guide:retract', 'guide:bubble', 'guide:done', 'guide:hint', 'guide:say', 'guide:circle', 'guide:marks', 'guide:marks:clear', 'voice:state', 'voice:hush', 'knot:corner', 'knot:pos', 'knot:move', 'knot:size', 'knot:island', 'hands:state', 'tasks:event', 'tasks:windows', 'tour:card', 'tour:update', 'tour:end', 'knot:backdrop', 'power:state', 'ptt:state', 'dictation:state', 'settings:changed', 'capture:policy', 'focus:guard', 'play:start', 'quick:open'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, data) => cb(data));
   }

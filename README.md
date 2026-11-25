@@ -26,6 +26,22 @@ Kaashify uses its own Windows app identity and stores its profile in
 [Kaashify contact page](https://www.kaashify.com/contact). This standalone build
 has no account sync, usage telemetry, or hosted update feed.
 
+## Quick Ask and dictation
+
+Say **Open Notepad** with the talk key or enter it in floating Quick Ask.
+Exact matches for installed apps launch locally. For one-shot dictation,
+say **Open Notepad and then type**, then say the line you want to enter.
+
+For hands-free dictation, focus a text field in Windows and say **Start
+typing** with the talk key, or enter it in Quick Ask. Release the talk key
+and wait for **Dictating**, then speak normally. Kaashify inserts finalized
+speech in the selected window using its local speech model. Another window
+coming forward pauses dictation and closes the mic. Return to the original
+window and use **Start typing** to resume. Say **Kaashify, stop typing** while
+dictating, enter **Stop typing** in Quick Ask, or press **Esc**. A session
+ends automatically after five minutes. If **Open mic** is enabled, start
+hands-free dictation from Quick Ask.
+
 ## Build from source on Windows x64
 
 Use Node.js 24 LTS and npm. Install the pinned dependencies and local models,

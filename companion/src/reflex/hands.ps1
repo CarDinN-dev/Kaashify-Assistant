@@ -156,7 +156,7 @@ function Ensure-Target($req) {
   # be in front: an app it just opened may still be coming up, or the person
   # may have glanced at another window (live 2026-10-11: Ctrl+Enter meant for
   # Notepad landed in the chat window that was still in front).
-  if ($req.hwnd) {
+  if ($req.hwnd -and -not $req.strictForeground) {
     $h = [IntPtr][int64]$req.hwnd
     if ([KaashifyHands]::IsWindow($h) -and [KaashifyHands]::GetForegroundWindow() -ne $h) {
       [void][KaashifyHands]::Activate($h); Start-Sleep -Milliseconds 80; $refocused = $true
@@ -166,6 +166,19 @@ function Ensure-Target($req) {
   $name = ''; $type = ''
   try { $f = $AE::FocusedElement; if ($f) { $name = [string]$f.Current.Name; $type = [string]$f.Current.LocalizedControlType } } catch {}
   return @{ ours = ($self -ne 0 -and [KaashifyHands]::FgPid() -eq $self); window = [KaashifyHands]::Title($fg); focus = $name; focusType = $type; refocused = $refocused }
+}
+
+# Hands-free dictation must never activate a window or type into a password field.
+function Confirm-DictationTarget($req) {
+  if (-not $req.hwnd -or -not $req.targetPid -or -not $req.deadline) { return $false }
+  if ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -gt [int64]$req.deadline) { return $false }
+  $h = [IntPtr][int64]$req.hwnd
+  if ([KaashifyHands]::GetForegroundWindow() -ne $h -or [KaashifyHands]::FgPid() -ne [uint32]$req.targetPid) { return $false }
+  try {
+    $f = $AE::FocusedElement
+    if (-not $f -or $f.Current.IsPassword) { return $false }
+  } catch { return $false }
+  return ([KaashifyHands]::GetForegroundWindow() -eq $h -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -le [int64]$req.deadline)
 }
 
 # What is on the clipboard (text, an image, or copied files), so it can be put
@@ -286,6 +299,7 @@ function Handle($req) {
       return @{ ok=$true; window=$where.window; focus=$where.focus; focusType=$where.focusType; refocused=$where.refocused }
     }
     'keys.text' {
+      if ($req.strictForeground -and -not (Confirm-DictationTarget $req)) { return @{ ok=$false; stopped='focus' } }
       $where = Ensure-Target $req
       if ($where.ours) { return @{ ok=$false; error='the keys would have gone to Kaashify itself'; window=$where.window } }
       $secret = $false
@@ -306,12 +320,13 @@ function Handle($req) {
       $how = 'paste'
       if ($t.Length -gt 0) {
         $pasted = $false
+        $clipChanged = $false
+        $oldText = $null; $oldImage = $null; $oldFiles = $null
+        $CB = [System.Windows.Forms.Clipboard]
         try {
           # What was on the clipboard: text, an image or copied files are put
           # back afterwards (a data object taken off the clipboard cannot be
           # put back whole; its contents can).
-          $oldText = $null; $oldImage = $null; $oldFiles = $null
-          $CB = [System.Windows.Forms.Clipboard]
           try {
             if ($CB::ContainsText()) { $oldText = $CB::GetText() }
             elseif ($CB::ContainsImage()) { $oldImage = $CB::GetImage() }
@@ -322,7 +337,9 @@ function Handle($req) {
           # cannot see (past the first 6000 characters, say), not that it failed.
           $before = Read-FocusedText
           $CB::SetText($t, [System.Windows.Forms.TextDataFormat]::UnicodeText)
+          $clipChanged = $true
           Start-Sleep -Milliseconds 30
+          if ($req.strictForeground -and -not (Confirm-DictationTarget $req)) { return @{ ok=$false; stopped='focus' } }
           [KaashifyHands]::Chord([int[]]@(0x11, 0x56))
           # A browser reads the clipboard a moment after the key, so the old
           # clipboard goes back only once the field shows the words (live
@@ -348,7 +365,7 @@ function Handle($req) {
           } elseif ($verified -eq $false -and $null -ne $before -and $v -ne $before) {
             # The box changed, so the paste went in where the read cannot see it.
             $how = 'paste'
-          } elseif ($verified -eq $false -and $req.retype -eq $false) {
+          } elseif ($verified -eq $false -and ($req.strictForeground -or $req.retype -eq $false)) {
             # Dictation (0.1.37) asks for no retype. Firefox reports its address
             # bar as the focused field while the caret is in a page's text box, so
             # the read cannot see a paste that did land, and typing it again put
@@ -363,16 +380,20 @@ function Handle($req) {
             $v = Read-FocusedText
             if ($null -ne $v -and (Squash $v).Contains($needle)) { $verified = $true }
           }
-          try {
-            if ($null -ne $oldText) { $CB::SetText($oldText) }
-            elseif ($null -ne $oldImage) { $CB::SetImage($oldImage) }
-            elseif ($null -ne $oldFiles) { $CB::SetFileDropList($oldFiles) }
-            else { $CB::Clear() }
-          } catch {}
           $pasted = $true
         } catch { $pasted = $false }
-        if (-not $pasted -and $t -match "[\r\n]") {
-          # Same rule when the clipboard itself failed (L4): no Enter by accident.
+        finally {
+          if ($clipChanged) {
+            try {
+              if ($null -ne $oldText) { $CB::SetText($oldText) }
+              elseif ($null -ne $oldImage) { $CB::SetImage($oldImage) }
+              elseif ($null -ne $oldFiles) { $CB::SetFileDropList($oldFiles) }
+              else { $CB::Clear() }
+            } catch {}
+          }
+        }
+        if (-not $pasted -and ($req.strictForeground -or $t -match "[\r\n]")) {
+          # A strict or multi-line paste never falls back to sending text as keys.
           $how = 'none'; $verified = $false
         } elseif (-not $pasted) {
           $how = 'sendkeys'
@@ -382,8 +403,8 @@ function Handle($req) {
       }
       # Enter only once the words are in (or could not be checked); a box that
       # plainly does not hold them is not submitted empty.
-      if ($req.enter -and $verified -ne $false) { Start-Sleep -Milliseconds 80; [KaashifyHands]::Chord([int[]]@(0x0D)) }
-      return @{ ok=$true; chars=$t.Length; how=$how; verified=$verified; submitted=[bool]($req.enter -and $verified -ne $false); window=$where.window; focus=$where.focus; focusType=$where.focusType; refocused=$where.refocused }
+      if (-not $req.strictForeground -and $req.enter -and $verified -ne $false) { Start-Sleep -Milliseconds 80; [KaashifyHands]::Chord([int[]]@(0x0D)) }
+      return @{ ok=$true; chars=$t.Length; how=$how; verified=$verified; submitted=[bool](-not $req.strictForeground -and $req.enter -and $verified -ne $false); window=$where.window; focus=$where.focus; focusType=$where.focusType; refocused=$where.refocused }
     }
     'keys.slow' {
       # The first-run hello (companion/src/hello.js): words typed live into the one window the

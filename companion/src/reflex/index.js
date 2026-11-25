@@ -14,7 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const jev = require('./jev');
-const { createRulesClient } = require('./rules');
+const { createRulesClient, exactLaunchApp } = require('./rules');
 const PASS_FILLER = /^\s*(?:(?:alright|okay|ok|great|cool|nice|hmm+|uh+|um+|yeah|yes|no|right|so|well|hold on|one sec|wait|it's okay|its okay|never mind|nevermind|thanks|thank you)[\s.,!?]*)+$/i;
 const { route, splitClauses, typePayload, plainDictation, POLICY } = require('./router');
 const { loadCatalog } = require('./catalog');
@@ -426,7 +426,12 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
     return { handled: fired > 0 || down || (final && !brainText), brainText: brainText || null, fired, down };
   }
 
-  return { start, handle, warm, enabled, session, get apps() { return apps; } };
+  return {
+    start, handle, warm, enabled, session,
+    exactLaunchApp: (text) => exactLaunchApp(text, apps),
+    clearCarry: () => { carry = { text: '', at: 0 }; },
+    get apps() { return apps; },
+  };
 }
 
 module.exports = { createReflex, opensLikeGuideAsk };

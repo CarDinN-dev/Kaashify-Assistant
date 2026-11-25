@@ -663,7 +663,7 @@ test('a paste the field cannot confirm holds Enter and stops for the user to ver
   // The sidecar checks the field after the paste and holds Enter when the words are not there.
   const ps1 = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'reflex', 'hands.ps1'), 'utf8');
   assert.match(ps1, /function Read-FocusedText/);
-  assert.match(ps1, /if \(\$req\.enter -and \$verified -ne \$false\)/);
+  assert.match(ps1, /if \(-not \$req\.strictForeground -and \$req\.enter -and \$verified -ne \$false\)/);
   const probe = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'win', 'probe.ps1'), 'utf8');
   assert.match(probe, /'uia\.focused' \{/);
 });
@@ -852,7 +852,7 @@ test('2026-11-01 security L4: the paste fallback never retypes text with a line 
   const body = ps.slice(ps.indexOf("'keys.text' {"), ps.indexOf('return @{ ok=$true; chars=$t.Length'));
   assert.equal(body.split('SendKeys]::SendWait(').length - 1, 2, 'two retype branches: unconfirmed paste and failed clipboard');
   assert.ok(body.includes('if ($verified -eq $false -and ' + guard + ')'), 'the unconfirmed paste branch is gated');
-  assert.ok(body.includes('if (-not $pasted -and ' + guard + ')'), 'the failed clipboard branch is gated');
+  assert.ok(body.includes('if (-not $pasted -and ($req.strictForeground -or ' + guard + '))'), 'the failed clipboard branch is gated');
   assert.ok(body.indexOf(guard) < body.indexOf('SendKeys]::SendWait('), 'the guard comes before the first retype');
   assert.ok(body.includes('$before = Read-FocusedText') && body.includes('$v -ne $before'), 'a box that changed is not retyped either');
 });

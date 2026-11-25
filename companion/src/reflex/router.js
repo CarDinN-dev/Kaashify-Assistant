@@ -6,6 +6,7 @@
 // and what goes to the thinking model instead.
 const { choice, noul } = require('./jev');
 const { soundsLike } = require('./soundslike');
+const { exactLaunchApp } = require('./rules');
 const { parseFocusCommand, looseFocusCommand } = require('./focus-guard');
 
 // Every action here is reversible and local. Nothing sends, buys, deletes, or
@@ -374,6 +375,13 @@ function decide(clause, answers, { final, apps, keyed }) {
 }
 
 async function route(clause, { final, apps, context, jev, log, keyed }) {
+  // Only explicit commands can use the exact-name shortcut. The room mic
+  // still needs the classifier to decide whether anyone addressed Kaashify.
+  const app = keyed ? exactLaunchApp(clause, apps) : null;
+  if (app) {
+    const answers = { intent: { choice: 'open_app', confidence: 1 }, app: { choice: app.key, confidence: 1 } };
+    return { ...decide(clause, answers, { final, apps, keyed }), ms: 0, model: 'code' };
+  }
   const { ws, questions } = buildQuestions(clause, apps);
   if (!ws.length) return { clause, intent: 'none', confidence: 0, fire: false, brain: false, final: !!final, ms: 0 };
   // Plain dictation through the talk key needs no classifier at all: nothing it

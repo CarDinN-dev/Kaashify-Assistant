@@ -7,7 +7,7 @@
 // complete, addressed) in the same answer shape, so decide() and the rest of
 // the engine run unchanged. They are conservative: when in doubt the clause is
 // handed to the thinking model or dropped, never fired.
-const { soundsLike } = require('./soundslike');
+const { soundsLike, spokenNames } = require('./soundslike');
 
 const POLITE = '(?:(?:hey|ok|okay|so|um|uh|please|kaashify|can you|could you|would you|lets|let\'s|now|just|and|then)[\\s,]+)*';
 const lead = (body) => new RegExp('^' + POLITE + '(?:' + body + ')\\b', 'i');
@@ -282,6 +282,16 @@ function namesTarget(text, apps = []) {
 // The reflex layer does that in well under a second; Hands would take a
 // screenshot first. Everything else that names an app is Hands' job.
 const LAUNCH_ONLY = /^(?:(?:hey|ok|okay|so|um|uh|please|kaashify|can you|could you|would you|lets|let's|now|just|and|then)[\s,]+)*(?:open(?: up)?|launch|start|switch to|bring up|pull up|go to)\s+(?:the\s+|my\s+)?([a-z][a-z0-9 .+'-]{1,40}?)[.!?]*$/i;
+function exactLaunchApp(text, apps = []) {
+  const match = LAUNCH_ONLY.exec(String(text || '').trim());
+  if (!match) return null;
+  const normalize = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const target = normalize(match[1]);
+  const named = apps.filter((app) => normalize(app.name) === target);
+  if (named.length) return named.length === 1 ? named[0] : null;
+  const aliased = apps.filter((app) => spokenNames(app).some((name) => normalize(name) === target));
+  return aliased.length === 1 ? aliased[0] : null;
+}
 function bareLaunch(text, apps = []) {
   const m = LAUNCH_ONLY.exec(String(text || '').trim());
   if (!m) return false;
@@ -417,4 +427,4 @@ function createRulesClient({ apps = () => [], sites = [], now = () => Date.now()
   };
 }
 
-module.exports = { ruleAnswers, createRulesClient, needsScreen, asksAboutSelf, isTask, multistep, carriesText, namesTarget, bareLaunch, handsTakes, launchClause, rewriteAsk, asksDue, readsPage, greeting, messageAsk, fieldFollowUp, trimCutOff, endsMidPhrase, RULES };
+module.exports = { ruleAnswers, createRulesClient, needsScreen, asksAboutSelf, isTask, multistep, carriesText, namesTarget, bareLaunch, exactLaunchApp, handsTakes, launchClause, rewriteAsk, asksDue, readsPage, greeting, messageAsk, fieldFollowUp, trimCutOff, endsMidPhrase, RULES };

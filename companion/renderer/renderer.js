@@ -778,7 +778,8 @@
 
   // ---- capture: mic (renderer side) --------------------------------------
   let audioCtx = null, micStream = null, micNode = null, micProc = null;
-  let pttHeld = false;
+  let pttHeld = false, dictationId = null;
+  let micStarting = null, micGeneration = 0;
   const captureOn = () => $('#stop-btn').classList.contains('active');
   // A mic that died underneath us (Chromium's audio service was killed, the
   // device was unplugged, the context closed) must not count as "already
@@ -797,8 +798,9 @@
   async function micFound() {
     try { return NM.inputs(await navigator.mediaDevices.enumerateDevices()); } catch (_) { return { list: [], defaultLabel: '' }; }
   }
-  async function openMicStream() {
+  async function openMicStream(generation) {
     const found = await micFound();
+    if (generation !== micGeneration) return null;
     micFoundList = found;
     kaashify.log('mic: ' + found.list.length + ' input device(s), default ' + (found.defaultLabel || 'unnamed') + (settings && settings.micDeviceId ? ', picked ' + (settings.micDeviceLabel || 'one') : ''));
     const want = NM.choose(found, settings || {});
@@ -806,40 +808,60 @@
     if (want.why === 'missing' && micMissingSaid !== want.wanted) { micMissingSaid = want.wanted; showStatus((want.wanted || 'Your microphone') + ' is not plugged in. Using ' + (want.label || (/Mac/.test(navigator.platform || '') ? 'the Mac default' : 'the Windows default')) + '.'); }
     try {
       const stream = await navigator.mediaDevices.getUserMedia(NM.constraints(want.id));
-      micOpenId = want.id;
-      return stream;
+      return { stream, id: want.id };
     } catch (err) {
       // A picked device that will not open: the Windows default instead, before giving up.
+      if (generation !== micGeneration) return null;
       if (!want.id) throw err;
       kaashify.log('mic: ' + (want.label || 'picked device') + ' did not open (' + (err && err.name) + '), trying the default');
-      const stream = await navigator.mediaDevices.getUserMedia(NM.constraints(''));
-      micOpenId = '';
-      return stream;
+      return { stream: await navigator.mediaDevices.getUserMedia(NM.constraints('')), id: '' };
     }
   }
-  async function startMic() {
+  function startMic() {
+    if (micStarting) return micStarting;
     if (micDead()) { kaashify.log('mic: previous stream is dead, reopening'); stopMic(); }
-    if (micStream) return;
+    if (micStream) return Promise.resolve(true);
+    const generation = micGeneration;
+    micStarting = prepareMic(generation).finally(() => { if (generation === micGeneration) micStarting = null; });
+    return micStarting;
+  }
+
+  async function prepareMic(generation) {
     try {
       micLastError = '';
-      micStream = await openMicStream();
-      micStream.getAudioTracks().forEach((t) => { t.onended = () => { kaashify.log('mic: track ended (' + (t.label || 'device') + ')'); if (!pttHeld) stopMic(); }; });
+      const opened = await openMicStream(generation);
+      if (!opened) return false;
+      if (generation !== micGeneration) {
+        opened.stream.getTracks().forEach((track) => track.stop());
+        return false;
+      }
+      micOpenId = opened.id;
+      micStream = opened.stream;
+      micStream.getAudioTracks().forEach((t) => { t.onended = () => {
+        if (generation !== micGeneration) return;
+        kaashify.log('mic: track ended (' + (t.label || 'device') + ')');
+        if (dictationId != null) kaashify.dictationMicFailed(dictationId);
+        else if (!pttHeld) stopMic();
+      }; });
       // The chord was released before the mic came up: it stays warm for the
       // next press (the idle timer in ptt:state closes it), audio dropped.
       // Do NOT force sampleRate here: some Windows drivers reject the context
       // outright, which is why capture could silently produce nothing. Take
       // whatever rate we get and downsample inside the worklet.
       audioCtx = new AudioContext();
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
-      await audioCtx.audioWorklet.addModule('./pcm-processor.js');
-      micNode = audioCtx.createMediaStreamSource(micStream);
+      const ctx = audioCtx;
+      if (ctx.state === 'suspended') await ctx.resume();
+      if (generation !== micGeneration) return false;
+      await ctx.audioWorklet.addModule('./pcm-processor.js');
+      if (generation !== micGeneration) return false;
+      micNode = ctx.createMediaStreamSource(micStream);
       micProc = new AudioWorkletNode(audioCtx, 'pcm-processor', { processorOptions: { targetRate: 16000 } });
       // One mic, two sinks: push-to-talk while the chord is held, the
       // meeting transcript otherwise.
       // One mic, two sinks, and a third case: between presses the mic stays
       // warm for a while (see ptt:state) and its audio goes nowhere.
       micProc.port.onmessage = (e) => {
-        if (pttHeld) kaashify.pttPcm(e.data.buffer);
+        if (pttHeld) kaashify.pttPcm(e.data.buffer, dictationId);
         else if (captureOn()) kaashify.micPcm(e.data.buffer);
         else if (tourMic) { tourLevel(e.data.level); return; }
         else return;
@@ -853,9 +875,11 @@
       setMicError('');
       // Names show only once the mic may be used: read the list again now.
       micFound().then((f) => { micFoundList = f; if (tourCard && tourCard.kind === 'mic') renderTourMics(); });
+      return true;
     } catch (err) {
+      if (generation !== micGeneration) return false;
+      stopMic();
       micLastError = (err && err.name) || 'Error';
-      micOpenId = null;
       const message = (err && err.name === 'NotAllowedError')
         ? (/Mac/.test(navigator.platform || '') ? 'Microphone blocked. Allow it in System Settings > Privacy & Security > Microphone, then click Listen again.' : 'Microphone blocked. Allow it in Windows Settings > Privacy > Microphone, then click Listen again.')
         : (err && err.name === 'NotFoundError')
@@ -863,15 +887,19 @@
           : 'Microphone failed: ' + (err && err.message);
       kaashify.log('mic error: ' + (err && err.message));
       setMicError(message);
-      showStatus(message);
+      if (dictationId == null) showStatus(message);
+      else kaashify.dictationMicFailed(dictationId);
+      return false;
     }
   }
 
   function stopMic() {
+    micGeneration++;
+    micStarting = null;
     micOpenId = null;
     if (micProc) { micProc.port.onmessage = null; micProc.disconnect(); micProc = null; }
     if (micNode) { micNode.disconnect(); micNode = null; }
-    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
   }
   // Open again on the device that should be open now, if the mic is open at all.
@@ -973,8 +1001,9 @@
   // next press hears from the first frame; after that it closes.
   const MIC_WARM_MS = 45000;
   let micIdleTimer = null;
-  kaashify.on('ptt:state', ({ held }) => {
+  kaashify.on('ptt:state', ({ held, dictationId: id, closeMic }) => {
     pttHeld = !!held;
+    dictationId = id ?? null;
     if (pttHeld && play && play.active) stopPlay('task');
     tourPtt(pttHeld);
     if (islandOn) syncKnotUi(); else syncIsland(lastIslandState);
@@ -984,7 +1013,10 @@
     if (pttHeld) { stopSpeaking(); startMic(); }
     else {
       if (knot3d && knot3d.setLevel) knot3d.setLevel(0);
-      if (!captureOn()) micIdleTimer = setTimeout(() => { if (!pttHeld && !captureOn()) stopMic(); }, MIC_WARM_MS);
+      if (!captureOn()) {
+        if (closeMic) stopMic();
+        else micIdleTimer = setTimeout(() => { if (!pttHeld && !captureOn()) stopMic(); }, MIC_WARM_MS);
+      }
       ack({ silent: true });
       cues.play('release');
     }
@@ -993,7 +1025,31 @@
     // (renders-0115 O5): it marks the mic opening, and the whisper test shows
     // the transcript stays clean under it.
     if (pttHeld && cues.quiet) cues.quiet();
-    if (pttHeld) cues.play('press', { force: true });
+    if (pttHeld && id == null) cues.play('press', { force: true });
+  });
+
+  const dictationChip = $('#dictation-chip');
+  let dictationNoticeTimer;
+  kaashify.on('dictation:state', ({ phase, reason }) => {
+    const notices = {
+      stopped: ['Dictation stopped', ''],
+      focus: ['Dictation paused', 'Return to the original window and use “Start typing.”'],
+      paste: ['Dictation paused', 'The text could not be pasted. Use “Start typing” to resume.'],
+      timeout: ['Dictation ended', 'Use “Start typing” to begin again.'],
+      'no-target': ['No text field selected', 'Click a text field and use “Start typing.”'],
+      speech: ['Local speech model unavailable', 'Reinstall Kaashify to restore the built-in model.'],
+      microphone: ['Microphone unavailable', 'Check your device and microphone permissions.'],
+    };
+    const notice = phase === 'active'
+      ? ['Dictating', 'Say “Kaashify, stop typing” or press Esc.']
+      : notices[reason];
+    clearTimeout(dictationNoticeTimer);
+    dictationChip.hidden = !notice;
+    if (!notice) return;
+    dictationChip.dataset.phase = phase;
+    $('#dictation-title').textContent = notice[0];
+    $('#dictation-instruction').textContent = notice[1];
+    if (phase === 'idle') dictationNoticeTimer = setTimeout(() => { dictationChip.hidden = true; }, 4500);
   });
   // Cues never play while the mic is live, so none can reach transcription,
   // and never over its own speech.

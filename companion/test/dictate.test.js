@@ -283,7 +283,7 @@ test('the tour card: once, after the talk key card, on its step number, practice
 test('the dashboard has the switch and paints it from the effective state', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'home', 'index.html'), 'utf8');
   const js = fs.readFileSync(path.join(__dirname, '..', 'home', 'home.js'), 'utf8');
-  assert.match(html, /<input id="dictation" type="checkbox">Dictation/);
+  assert.match(html, /<input id="dictation" type="checkbox">Ctrl\+Win dictation/);
   assert.match(js, /'dictation':\['dictation',e=>e\.checked\]/);
   assert.match(js, /\$\('#dictation'\)\.checked=!!\(s\._dictation&&s\._dictation\.on\)/);
 });

@@ -98,10 +98,24 @@ function unsureJev(calls) {
   return { ready: () => true, systemOne: async ({ state }) => { if (state.utterance !== 'hello') calls.push(state.utterance); return { answers: { intent: { choice: 'ask', confidence: 0.8 }, addressed: { noul: 0.9 } }, ms: 150, model: 'fake' }; } };
 }
 function rig() {
-  const calls = []; const ops = []; const fires = []; const brain = [];
-  const probe = { request: async (op, p) => { ops.push(op + (p && p.text ? ':' + p.text : '')); if (op === 'fg') return { hwnd: 1 }; if (op === 'apps.list') return { apps: [{ name: 'Notepad', appId: 'np' }] }; return { ok: true }; } };
-  const reflex = createReflex({ probe, shell: { openExternal: async () => {} }, jevClient: unsureJev(calls), onFire: (f) => fires.push(f), onBrain: (t) => brain.push(t), spawnFn: () => ({ unref() {} }) });
-  return { reflex, calls, ops, fires, brain };
+  const calls = [], ops = [], fires = [], brain = [], launches = [];
+  let fg = { hwnd: 1 };
+  const probe = { request: async (op, p) => {
+    ops.push(op + (p?.text ? ':' + p.text : ''));
+    if (op === 'fg') return fg;
+    if (op === 'apps.list') return { apps: [{ name: 'Notepad', appId: 'np' }] };
+    return { ok: true };
+  } };
+  const spawnFn = (exe, args) => {
+    launches.push([exe, args]);
+    fg = { hwnd: 2, title: 'Untitled - Notepad', process: 'Notepad' };
+    return { unref() {} };
+  };
+  const reflex = createReflex({
+    probe, shell: { openExternal: async () => {} }, jevClient: unsureJev(calls),
+    onFire: (f) => fires.push(f), onBrain: (t) => brain.push(t), spawnFn,
+  });
+  return { reflex, calls, ops, fires, brain, launches };
 }
 
 test('the engine types the sentence, once, with no model asked and nothing sent to the guide', async () => {
@@ -268,9 +282,24 @@ test('a command is not held for the careful pass, and words from another press a
   assert.equal(e.routed.length, 1);
 });
 
-test('key up runs the flush, then the careful pass, then routes what is still held', () => {
+test('key up finishes the normal press or hands off to hands-free dictation', async () => {
+  const vm = require('node:vm');
   const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
-  assert.match(main, /ptt\.flushing = true;\s+try \{ await getListener\(\)\.flush\(\); \} catch \(e\) \{[^}]+\} finally \{ ptt\.flushing = false; \}\s+await hearWholePress\(pcm, press\);\s+routeHeldOnRelease\(\);/);
+  const stop = main.slice(main.indexOf('async function pttStop('), main.indexOf('// Hands-free dictation shares'));
+  for (const startDictation of [false, true]) {
+    const events = [];
+    const ptt = { held: true, streaming: true, chunks: [], finals: 1, press: 1 };
+    const ctx = {
+      ptt, Buffer, Date, clearTimeout, stopMacReleaseWatch() {}, send() {}, probeReady: () => false,
+      sayNeutral() {}, heardText() {}, guide: null, restoreKnotState() {},
+      getListener: () => ({ flush: async () => { events.push('flush'); ptt.sessionStart = startDictation; } }),
+      hearWholePress: async () => { events.push('whole'); },
+      routeHeldOnRelease: () => events.push('route'),
+      handleTypingCommand: (text, source) => { assert.equal(ptt.held || ptt.flushing, false); events.push(text, source); },
+    };
+    await vm.runInNewContext(stop + '\npttStop("release");', ctx);
+    assert.deepEqual(events, startDictation ? ['flush', 'start typing', 'voice'] : ['flush', 'whole', 'route']);
+  }
   assert.match(main, /function wholePressWanted\(text\) \{ return process\.env\.KAASHIFY_WHOLE_PRESS !== '0' && !OPEN_MIC && carriesText\(text\); \}/);
 });
 
@@ -357,4 +386,24 @@ test('the whole press goes to Parakeet first when it is loaded, and to the caref
   }
   // No whisper either: no answer, the fast words stand.
   assert.equal(await createListener({ transcribe: async () => 'fast', finalEngine: engine(false, 'x') }).whole(pcm(2000)), '');
+});
+
+test('explicit exact app launches skip the configured classifier and keep one-shot dictation', async () => {
+  const r = rig();
+  await r.reflex.start();
+  const out = await r.reflex.handle('Open Notepad and then type', { final: true, keyed: true });
+  assert.equal(out.fired, 1);
+  assert.deepEqual(r.fires.map((f) => f.intent), ['open_app']);
+  assert.deepEqual(r.launches, [['explorer.exe', ['shell:AppsFolder\\np']]]);
+  await r.reflex.handle('The next line.', { final: true, keyed: true });
+  assert.deepEqual(r.ops.filter((op) => op.startsWith('keys.text')), ['keys.text:The next line']);
+  assert.deepEqual(r.calls, []);
+});
+
+test('the room mic still asks the classifier about exact app names', async () => {
+  const r = rig();
+  await r.reflex.start();
+  const out = await r.reflex.handle('Open Notepad', { final: true, keyed: false });
+  assert.equal(out.fired, 0);
+  assert.deepEqual(r.calls, ['Open Notepad']);
 });
