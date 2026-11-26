@@ -11,6 +11,7 @@
 const path = require('path');
 const { chooseElement, overlap } = require('../guide/chooser');
 const { protectedKind } = require('./workflows');
+const { riskyLabel } = require('./consent');
 const { sensitiveTarget } = require('../guide/sensitive');
 
 const VK = { enter: 0x0D, return: 0x0D, escape: 0x1B, esc: 0x1B, tab: 0x09, backspace: 0x08, delete: 0x2E, del: 0x2E, space: 0x20, home: 0x24, end: 0x23, pageup: 0x21, pagedown: 0x22, up: 0x26, down: 0x28, left: 0x25, right: 0x27, ctrl: 0x11, control: 0x11, shift: 0x10, alt: 0x12, win: 0x5B, insert: 0x2D };
@@ -97,7 +98,7 @@ function frontIs(fg, app) {
   const proc = norm(fg.process);
   const title = norm(fg.title);
   // A browser the task uses: by process; any browser when the default one is unknown.
-  if (app.process && proc === norm(app.process)) return true;
+  if (app.process) return proc === norm(app.process);
   if (app.anyBrowser && BROWSERS.some((b) => proc === b.process)) return true;
   if (!want) return false;
   if (proc && (proc.includes(want) || want.includes(proc)) && proc.length >= 3) return true;
@@ -112,7 +113,7 @@ function frontIs(fg, app) {
 
 const APP_FRONT_MS = 8000;       // a cold start of Word, Excel or a browser
 
-function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleThread, launchApp, launchBrowser, defaultBrowser, apps, searchFiles, openPath, refuseSite, log = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), selfPid = -1 }) {
+function createActions({ chromeRun, inspectWorkflow, probe, hands, shell, pointAt, settleThread, launchApp, launchBrowser, defaultBrowser, apps, searchFiles, openPath, refuseSite, log = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), selfPid = -1 }) {
   const say = log;
   // Keys only ever go to the app the task opened (ctx.target). Live 2026-10-12:
   // a browser stayed behind a full-screen window, the next look landed on the
@@ -161,7 +162,11 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
   // Keys carry the window Hands last read and our own pid: the sidecar puts
   // that window back in front if the Companion has taken it, and never types
   // into the Companion itself.
-  const keyTarget = (ctx) => ({ hwnd: ctx && ctx.fg && ctx.fg.hwnd ? ctx.fg.hwnd : undefined, selfPid: selfPid > 0 ? selfPid : undefined });
+  const keyTarget = (ctx) => ({
+    hwnd: ctx?.fg?.hwnd || undefined, selfPid: selfPid > 0 ? selfPid : undefined,
+    ...(ctx?.strict ? { strictForeground: true, targetPid: ctx.fg?.pid, deadline: Date.now() + 2200 } : {}),
+  });
+  const guarded = report => ({ ok: false, guarded: true, report });
 
   // The point to act on, from an element (its centre) or a fraction of the screen.
   async function resolvePoint(args, ctx) {
@@ -186,9 +191,11 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
         const asked = args.text ? 'a control called "' + clip(String(args.text), 50) + '"' : args.id != null ? 'control ' + args.id : 'that control';
         return { ok: false, report: 'could not find ' + asked + ' among the ' + n + ' listed; this app lists few of its controls, so do not ask for it by text again: click by x and y from the screenshot instead' };
       }
+      if (ctx.strict && !ctx.approved && riskyLabel(t.name)) return guarded('Review and confirm that control yourself before continuing.');
       if (sensitiveTarget(t.element) || sensitiveTarget({ name: t.name, type: t.type || 'edit' })) return { ok: false, refused: 'password', report: 'that is a private field; the user fills it in' };
       if (pointAt) { try { pointAt(t.rect, { instruction: 'Clicking ' + (t.name ? '"' + clip(t.name, 40) + '"' : 'here') }); await sleep(settleThread || 250); } catch (_) { /* the thread is a courtesy */ } }
-      const r = await hands.request('mouse.click', { x: t.point.x, y: t.point.y, button: args.button === 'right' ? 'right' : args.button === 'middle' ? 'middle' : 'left', double: Boolean(args.double) }, 4000);
+      if (ctx.task?.controller?.signal.aborted) return guarded('The task was cancelled.');
+      const r = await hands.request('mouse.click', { ...(ctx.strict ? keyTarget(ctx) : {}), x: t.point.x, y: t.point.y, button: args.button === 'right' ? 'right' : args.button === 'middle' ? 'middle' : 'left', double: Boolean(args.double) }, 4000);
       if (r && r.refused) return { ok: false, refused: r.refused, report: 'that field is private; not clicked' };
       if (!r || !r.ok) return { ok: false, report: 'the click did not go through' + (r && r.error ? ': ' + r.error : '') };
       // Settle caps trimmed 2026-10-29: in the ledger a Hands step spent about
@@ -200,6 +207,7 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
     async type(args, ctx) {
       const text = String(args.text || '');
       if (!text) return { ok: false, report: 'nothing to type' };
+      if (ctx.strict && args.submit) return guarded('I can fill the field for you. Review it and submit it yourself.');
       const wrong = wrongWindow(ctx);
       if (wrong) return { ok: false, refused: 'window', report: wrong };
       let target = null;
@@ -211,10 +219,16 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
         // 2026-10-12: a retry typed the list into Notepad's tab header).
         if (NOT_A_FIELD.test(target.type || '')) return { ok: false, report: '"' + clip(target.name || target.type, 40) + '" is a ' + String(target.type).toLowerCase() + ', not a text field; type into the editor or the box itself, or just type with no id when it already has focus' };
         if (pointAt) { try { pointAt(target.rect, { instruction: 'Typing into ' + (target.name ? '"' + clip(target.name, 40) + '"' : 'this box') }); await sleep(settleThread || 250); } catch (_) { /* courtesy */ } }
-        const c = await hands.request('mouse.click', { x: target.point.x, y: target.point.y, button: 'left' }, 4000);
+        const c = await hands.request('mouse.click', { ...(ctx.strict ? keyTarget(ctx) : {}), x: target.point.x, y: target.point.y, button: 'left' }, 4000);
         if (c && c.refused) return { ok: false, refused: c.refused, report: 'that field is private; not typed' };
+        if (ctx.strict && !c?.ok) return guarded('The field moved before I could select it.');
         await sleep(150);
-        if (!args.append) { await hands.request('keys.press', Object.assign({ keys: [VK.ctrl, VK.a] }, keyTarget(ctx)), 2000); await sleep(40); }
+        if (ctx.task?.controller?.signal.aborted) return guarded('The task was cancelled.');
+        if (!args.append) {
+          const selected = await hands.request('keys.press', Object.assign({ keys: [VK.ctrl, VK.a] }, keyTarget(ctx)), 2000);
+          if (ctx.strict && !selected?.ok) return guarded('The field moved before I could select its text.');
+          await sleep(40);
+        }
       }
       if (!target) {
         // Typing into whatever has focus: Kaashify still flies to that field,
@@ -223,6 +237,7 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
         if (f && f.isPassword) return { ok: false, refused: 'password', report: 'the focused field is private; the user fills it in' };
         if (f && f.rect && pointAt) { try { pointAt(f.rect, { instruction: 'Typing into ' + (f.name ? '"' + clip(f.name, 40) + '"' : 'this box') }); await sleep(settleThread || 250); } catch (_) { /* courtesy */ } }
       }
+      if (ctx.task?.controller?.signal.aborted) return guarded('The task was cancelled.');
       const r = await hands.request('keys.text', Object.assign({ text: text.slice(0, MAX_TEXT), enter: Boolean(args.submit) }, keyTarget(ctx)), 9000);
       if (r && r.refused) return { ok: false, refused: r.refused, report: 'the focused field is private; nothing typed' };
       if (!r || !r.ok) return { ok: false, report: 'typing did not go through' + (r && r.error ? ': ' + r.error : '') };
@@ -242,6 +257,7 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
       const wrong = wrongWindow(ctx);
       if (wrong) return { ok: false, refused: 'window', report: wrong };
       { const f = await focusedField(); if (f && f.rect && pointAt) { try { pointAt(f.rect, { instruction: 'Pressing ' + clip(args.keys, 20) }); await sleep(settleThread || 250); } catch (_) { /* courtesy */ } } }
+      if (ctx.task?.controller?.signal.aborted) return guarded('The task was cancelled.');
       const r = await hands.request('keys.press', Object.assign({ keys: vks }, keyTarget(ctx)), 3000);
       if (!r || !r.ok) return { ok: false, report: 'that key did not go through' + (r && r.error ? ': ' + r.error : '') };
       return { ok: true, report: 'pressed ' + clip(args.keys, 30) + (r.window ? ' in "' + clip(r.window, 60) + '"' : ''), lookAfter: 150, settle: 1500, giveUp: 600 };
@@ -258,7 +274,7 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
       const ticks = pages * PAGE_TICKS;
       const dy = dir === 'down' ? -ticks : dir === 'up' ? ticks : 0;
       const dx = dir === 'right' ? -ticks : dir === 'left' ? ticks : 0;
-      const r = await hands.request('mouse.scroll', { x: at.x, y: at.y, dy, dx }, 3000);
+      const r = await hands.request('mouse.scroll', { ...(ctx.strict ? keyTarget(ctx) : {}), x: at.x, y: at.y, dy, dx }, 3000);
       if (!r || !r.ok) return { ok: false, report: 'the scroll did not go through' };
       return { ok: true, report: 'scrolled ' + dir + ' ' + pages + (pages === 1 ? ' page' : ' pages'), lookAfter: 250, settle: 1200 };
     },
@@ -268,7 +284,8 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
       const to = await resolvePoint({ id: args.to_id, text: args.to_text, x: args.to_x, y: args.to_y }, ctx);
       if (!from || !to) return { ok: false, report: 'could not find both ends of the drag' };
       if (pointAt) { try { pointAt(to.rect, { instruction: 'Dragging to ' + (to.name ? '"' + clip(to.name, 40) + '"' : 'here') }); await sleep(settleThread || 250); } catch (_) { /* courtesy */ } }
-      const r = await hands.request('mouse.drag', { x0: from.point.x, y0: from.point.y, x1: to.point.x, y1: to.point.y }, 6000);
+      if (ctx.task?.controller?.signal.aborted) return guarded('The task was cancelled.');
+      const r = await hands.request('mouse.drag', { ...(ctx.strict ? keyTarget(ctx) : {}), x0: from.point.x, y0: from.point.y, x1: to.point.x, y1: to.point.y }, 6000);
       if (!r || !r.ok) return { ok: false, report: 'the drag did not go through' };
       return { ok: true, report: 'dragged ' + (from.name ? '"' + clip(from.name, 30) + '"' : 'it') + ' to ' + (to.name ? '"' + clip(to.name, 30) + '"' : 'the spot'), toName: to.name, lookAfter: 200, settle: 2000 };
     },
@@ -293,13 +310,14 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
       const fg = await awaitFront(hit, activated ? 2500 : APP_FRONT_MS, ctx);
       ctx.target = { name: hit.name };
       if (fg) { ctx.fg = fg; await pointWindow(fg, hit.name); return { ok: true, report: hit.name + ' is in front' + (fg.title ? ' ("' + clip(fg.title, 50) + '")' : ''), lookAfter: 150, settle: activated ? 600 : 1500, giveUp: 500 }; }
+      if (ctx.strict) return guarded('I could not verify the ' + hit.name + ' window. Bring it forward, then ask again.');
       return { ok: true, report: how + ' ' + hit.name + ', but its window is not in front yet; take a look before typing into it', lookAfter: 400, settle: 2500, giveUp: 1500 };
     },
 
     async open_url(args, ctx) {
       let url = String(args.url || '').trim();
       if (!/^https?:\/\//i.test(url)) url = 'https://' + url.replace(/^\/+/, '');
-      try { const u = new URL(url); if (!/^https?:$/.test(u.protocol) || !u.hostname.includes('.')) throw new Error('not a web address'); url = u.toString(); } catch (_) { return { ok: false, report: 'that is not a web address' }; }
+      try { const u = new URL(url); if (!/^https?:$/.test(u.protocol) || u.username || u.password || !u.hostname.includes('.')) throw new Error('not a web address'); url = u.toString(); } catch (_) { return { ok: false, report: 'that is not a web address' }; }
       // The focus guard is on and this is what it keeps the person off (live
       // 2026-11-03: Hands reopened what the guard closed, in a second browser).
       { const line = refuseSite && refuseSite(url); if (line) return { ok: false, guarded: true, report: line }; }
@@ -312,6 +330,7 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
         try { await launchBrowser(browser, url); named = browser; where = browser.label; }
         catch (e) { log('[hands] ' + browser.label + ' launch failed, default browser instead: ' + e.message); }
       }
+      if (ctx.task?.controller?.signal.aborted) return guarded('The task was cancelled.');
       if (!named) await shell.openExternal(url);
       // Opened is not in front: wait for the browser window, and make it the
       // only window the next keys may go to.
@@ -319,6 +338,7 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
       ctx.target = target;
       const fg = await awaitFront(target, APP_FRONT_MS, ctx);
       if (fg) { ctx.fg = fg; await pointWindow(fg, target.name); return { ok: true, report: 'opened ' + clip(url, 80) + ' in ' + where + '; ' + (fg.title ? '"' + clip(fg.title, 50) + '" is in front' : 'it is in front'), lookAfter: 500, settle: 2200, giveUp: 900 }; }
+      if (ctx.strict) return guarded('I could not verify the browser window. Bring it forward, then ask again.');
       return { ok: true, report: 'opened ' + clip(url, 80) + ' in ' + where + ', but the browser window is not in front; do not type yet: take a look, or open_app the browser', lookAfter: 400, settle: 2500, giveUp: 1500 };
     },
 
@@ -357,10 +377,25 @@ function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleTh
 
   async function run(name, args, ctx) {
     const fn = actions[name];
-    if (!fn) return { ok: false, report: 'no such action "' + clip(name, 30) + '"' };
     try {
-      if (inspectWorkflow && ['click', 'press', 'type', 'drag'].includes(name)) {
+      if (chromeRun) {
+        const result = await chromeRun(name, args || {}, ctx || {}, findElement);
+        if (result) return result;
+      }
+      if (!fn) return { ok: false, report: 'no such action "' + clip(name, 30) + '"' };
+      if (inspectWorkflow && ['click', 'press', 'type', 'drag', 'scroll'].includes(name)) {
         const front = await inspectWorkflow();
+        if (ctx?.strict) {
+          if (!ctx.fg?.hwnd || !ctx.fg.pid || !front?.fg?.hwnd || front.fg.hwnd !== ctx.fg.hwnd || front.fg.pid !== ctx.fg.pid || ctx.task?.controller?.signal.aborted) {
+            return guarded('The foreground changed or could not be verified. Bring the target window forward and ask again.');
+          }
+          if (/^(?:cmd|powershell|pwsh|windowsterminal|regedit|consent|credentialuibroker)$/i.test(front.fg.process || '')) {
+            return guarded('Continue manually in this system window.');
+          }
+          if (/^(?:chrome|msedge|firefox|brave|opera)$/i.test(front.fg.process || '') && name === 'press' && /(?:^|\+)(?:enter|return)$/i.test(args.keys || '')) {
+            return guarded('Review the page and press Enter yourself. For web search, ask Kaashify to search for your terms.');
+          }
+        }
         const surface = protectedKind(front) || protectedKind(ctx);
         if (surface === 'email' || surface === 'survey') {
           return { ok: false, guarded: true, report: surface === 'email'
@@ -429,12 +464,12 @@ function createBrowserLaunch({ execFile, spawn }) {
     });
     return tryHive(0).then((p) => { paths.set(exe, p); return p; });
   }
-  return async function launchBrowser(browser, url) {
+  return async function launchBrowser(browser, url, { newWindow = false } = {}) {
     const exe = await appPath(browser.exe);
     if (!exe) throw new Error(browser.label + ' is not installed');
     return new Promise((resolve, reject) => {
       let child;
-      try { child = (spawn || require('child_process').spawn)(exe, [url], { detached: true, stdio: 'ignore', windowsHide: true }); }
+      try { child = (spawn || require('child_process').spawn)(exe, newWindow ? ['--new-window', url] : [url], { detached: true, stdio: 'ignore', windowsHide: true }); }
       catch (e) { reject(new Error(String(e.message || e).slice(0, 120))); return; }
       child.on('error', (e) => reject(new Error(String(e.message || e).slice(0, 120))));
       // A browser that is already running hands the address to that instance and exits at once; a fresh one keeps running.

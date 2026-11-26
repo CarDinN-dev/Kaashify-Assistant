@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Kaashify Assistant",
+  "description": "Connect Chrome to Kaashify Assistant for tasks you start on your PC.",
+  "version": "0.1.44",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "nativeMessaging",
+    "tabs",
+    "webNavigation",
+    "alarms",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "page.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "incognito": "not_allowed",
+  "icons": {
+    "128": "icon128.png"
+  }
+}

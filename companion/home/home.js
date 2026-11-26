@@ -58,6 +58,28 @@
     if (v.installed) { await api.settingsSet({ voice: 'fable' }); notice('Fable is on.'); }
     paintVoice(await api.voiceStatus());
   });
+  function paintChrome(status) {
+    const connect = $('#chrome-connect');
+    const disconnect = $('#chrome-disconnect');
+    $('#chrome-connection-card').hidden = MAC_KEYS;
+    connect.hidden = status.connected;
+    connect.disabled = !status.available;
+    connect.textContent = status.enabled ? 'Reconnect Chrome' : 'Set up Chrome';
+    disconnect.hidden = !status.enabled;
+    $('#chrome-connection-state').textContent = !status.available ? 'Chrome setup is unavailable in this build.'
+      : status.connected ? 'Connected to this Chrome profile.'
+      : status.enabled ? 'Waiting for Chrome. Confirm the extension install in Chrome to finish setup.'
+      : 'Disconnected.';
+  }
+  if (api.chromeStatus) {
+    api.on('home:chrome', paintChrome);
+    $('#chrome-connect').onclick = event => run(async () => {
+      const result = await api.chromeConnect();
+      paintChrome(await api.chromeStatus());
+      if (!result.ok) throw new Error('Could not open Chrome setup. Check that Chrome is installed.');
+    }, event.currentTarget);
+    $('#chrome-disconnect').onclick = event => run(async () => paintChrome(await api.chromeDisconnect()), event.currentTarget);
+  }
   api.on('home:voice', v => paintVoice(v));
   $('#wake-commands-row').hidden = MAC_KEYS;
   function paintVoiceOptions(s) {
@@ -210,6 +232,7 @@
     $('#ptt-live').textContent=chord(status.ptt.accelerator);
     $('#ptt-input').placeholder=chord(status.ptt.accelerator);
     $('#open-mic').checked=!!s.openMic;
+    if (api.chromeStatus) paintChrome(await api.chromeStatus());
     paintVoiceOptions(s);
     fillMics(s);
     $('#persist-transcripts-home').checked=s.persistTranscripts!==false;

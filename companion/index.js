@@ -14,6 +14,10 @@ const { captureScreenshot } = require('./src/screen');
 const { createSTT } = require('./src/stt');
 const { createSpeechApi } = require('./src/voice/speech-api');
 const { wakeCommand } = require('./src/voice/wake-command');
+const { createChromeBridge, EXTENSION_ID } = require('./src/chrome/bridge');
+const { makeBrowserActions, isChrome, willUseChrome } = require('./src/chrome/actions');
+const { compoundRequest } = require('./src/hands/compound');
+const { extensionId: storeExtensionId } = require('./src/chrome/store-listing.json');
 const speechApi = createSpeechApi();
 const { createLLM } = require('./src/llm');
 const { modelSettingsPatch, selectModel } = require('./src/models');
@@ -1776,6 +1780,7 @@ function registerIpc() {
       if (fileContext && Date.now() - fileContext.at > 300000) fileContext = null;
       if (p.about && fileContext) { answerFile(p.text); return; }
       if (refusedByGuard(p.text, p.source || 'typed', Date.now())) return;
+      if (!p.about && await routeEnhancedHands(p.text, 'typed', Date.now())) return;
       if (!p.about && routeWorkflow(p.text, 'typed', Date.now())) return;
       if (!(agent && agent.active()) && routeProjectAsk(p.text, p.source || 'typed', Date.now())) return;
       // Say "working" before the first await: the assignment router is a Jev
@@ -2444,6 +2449,74 @@ function readWorkflow() {
   if (!probeReady()) return Promise.resolve(null);
   return probe.request('workflow.read', {}, 3000).catch(() => null);
 }
+async function routeEnhancedHands(text, source, heardAt) {
+  if (!STANDALONE || !handsOn() || !probeReady() || agent?.active() || openMicSource(source)) return false;
+  const compound = compoundRequest(text, handsAppList());
+  let chrome = false;
+  if (!compound && !workflowRequest(text)) {
+    chrome = /\bchrome\b/i.test(text) && willUseChrome(text);
+    if (!chrome && /\b(?:search|look up|go to|visit|(?:new|switch|next|previous) tab|(?:read|summarize|find|click|type|fill).*\b(?:this|the|current) (?:page|tab|site))\b/i.test(text)) {
+      const fg = await probe.request('fg', { ignorePid: process.pid }, 750).catch(() => null);
+      chrome = isChrome(fg) && willUseChrome(text, fg) && !/\b(?:in|using) (?:edge|firefox|brave|opera)\b/i.test(text);
+    }
+  }
+  if (!compound && !chrome) return false;
+  if (agent?.active()) return false;
+  if (state.busy || typingOwnsMic() || dict.held || dict.busy) {
+    flash('Finish the current task before starting another.', 3500);
+    return true;
+  }
+  if (guide?.active()) guide.dismiss('hands');
+  releaseWorkflowFocus();
+  noteAsk(askModeFor(source), 'hands');
+  if (tasksOn()) submitHandsTask(text, source);
+  else void getAgent().run(text, source === 'typed' ? 'typed' : 'voice', { askedAt: heardAt, compound });
+  return true;
+}
+
+let chromeBridge;
+let browserActions;
+function chromeConnection() {
+  if (chromeBridge) return chromeBridge;
+  const profileDir = path.join(app.getPath('appData'), 'Kaashify');
+  const allowedProfile = process.platform === 'win32' && path.resolve(app.getPath('userData')).toLowerCase() === path.resolve(profileDir).toLowerCase();
+  const testId = !app.isPackaged ? process.env.KAASHIFY_CHROME_TEST_ID : '';
+  const extensionId = allowedProfile ? storeExtensionId || testId : '';
+  const executable = app.isPackaged ? path.join(process.resourcesPath, 'chrome', 'KaashifyChromeHost.exe')
+    : path.join(__dirname, '..', 'build', 'chrome', 'KaashifyChromeHost.exe');
+  chromeBridge = createChromeBridge({
+    extensionId, profileDir, executable,
+    getProfile: () => store.getSettings().chromeProfile,
+    saveProfile: id => { store.setSettings({ chromeProfile: id }); return !store.saveError(); },
+    onStatus: value => { hooks.onChromeStatus?.(value); },
+  });
+  browserActions = makeBrowserActions({ bridge: chromeBridge,
+    foreground: () => probe?.request('fg', { ignorePid: process.pid }, 950).catch(() => null), refuseSite: guardLine });
+  return chromeBridge;
+}
+
+async function connectChrome({ signal } = {}) {
+  const bridge = chromeConnection();
+  if (!bridge.status().available || signal?.aborted) return { ok: false };
+  store.setSettings({ chromeAutomation: true });
+  if (!await bridge.enable({ pair: true }) || signal?.aborted) return { ok: false };
+  if (bridge.status().connected) return { ok: true, opened: false };
+  if (!EXTENSION_ID.test(storeExtensionId)) return { ok: true, opened: false };
+  const nonce = require('node:crypto').randomBytes(16).toString('hex');
+  try {
+    const launch = createBrowserLaunch({ execFile: require('node:child_process').execFile });
+    await launch(browserFor('Chrome'), bridge.listing() + '#kaashify-setup=' + nonce, { newWindow: true });
+    return { ok: true, opened: true, nonce };
+  } catch { return { ok: false }; }
+}
+
+async function disconnectChrome() {
+  if (agent?.task?.chromeId) stopHands('chrome disconnected');
+  store.setSettings({ chromeAutomation: false, chromeProfile: '' });
+  await chromeConnection().disconnect();
+  return chromeConnection().status();
+}
+
 function routeWorkflow(text, source, heardAt) {
   if (agent?.active() || !['typed', 'voice', 'wake'].includes(source)) return false;
   const last = agent?.last;
@@ -2540,17 +2613,23 @@ function launchApp(appId) {
 }
 // A full read of the screen for one step: window, controls (with physical
 // rects and box fractions), the model's screenshot, and the display origin.
-async function handsRead() {
+async function handsRead(task) {
   let fg = await getGuide().foreground();
   // Alt+Tab's own "Task Switching" window is never the app: wait it out.
   for (let i = 0; i < 3 && isSwitcher(fg); i++) { await new Promise((r) => setTimeout(r, 350)); fg = await getGuide().foreground(); }
+  chromeConnection();
+  const chrome = await browserActions.inspect(fg, task);
+  if (chrome && !chrome.blocked) return { fg, cap: null, elements: chrome.elements, chrome };
+  if (chrome && ['protected', 'target-changed', 'browser-unavailable'].includes(chrome.blocked)) {
+    return { fg, cap: null, elements: [], chrome };
+  }
   let list = null;
   const listP = probeReady() && fg && fg.hwnd ? probe.request('uia.list', { hwnd: fg.hwnd, max: 150, budgetMs: 1200 }, 3000).catch(() => null) : Promise.resolve(null);
   const cap = await guideCapture();
   list = await listP;
   const originPhys = cap ? screenPoints().dipToScreen({ x: cap.display.bounds.x, y: cap.display.bounds.y }) : { x: 0, y: 0 };
   const elements = ((list && list.elements) || []).filter((e) => e.rect).map((e) => ({ id: e.id, name: e.name, type: e.type, automationId: e.automationId, isPassword: e.isPassword, rect: e.rect, box: cap ? (() => { const n = normRect(e.rect, cap, originPhys); return [n.x, n.y, n.w, n.h]; })() : null }));
-  return { fg, cap, elements, originPhys };
+  return { fg, cap, elements, originPhys, chrome };
 }
 // The apps Hands can open: the reflex layer already scanned the Start menu at
 // boot, so its list is reused. Scanning again would tie up the probe right
@@ -2585,7 +2664,9 @@ function pillMayTakeMouse() { return handsMouseOps === 0 && Date.now() - handsMo
 function buildActions() {
   const { execFile } = require('child_process');
   const os = require('os');
+  chromeConnection();
   return createActions({
+    chromeRun: browserActions.run,
     inspectWorkflow: readWorkflow,
     probe: { request: (op, p, ms) => probe.request(op, p, ms) },
     hands: { request: (op, p, ms) => { if (!/^mouse[.]/.test(op)) return getHands().request(op, p, ms); overlayMouse.set(true); handsMouseOps++; handsMouseAt = Date.now(); return Promise.resolve(getHands().request(op, p, ms)).finally(() => { handsMouseOps--; handsMouseAt = Date.now(); }); } },
@@ -2626,6 +2707,20 @@ function getAgent() {
   pending.ask = (card, action, ctx) => { send('hands:state', { active: true, waiting: true }); return askCard(card, action, ctx).finally(() => send('hands:state', { active: !!(agent && agent.active()), waiting: false })); };
   agent = new HandsAgent({
     read: handsRead,
+    releaseFocus: releaseWorkflowFocus,
+    compound: text => compoundRequest(text, handsAppList()),
+    oneActionPerLook: true,
+    chromeSetup: {
+      foreground: () => probe?.request('fg', { ignorePid: process.pid }, 950).catch(() => null),
+      needed: (text, fg) => {
+        const s = chromeConnection().status();
+        return s.available && !s.connected && willUseChrome(text, fg);
+      },
+      connect: connectChrome,
+      ready: () => chromeConnection().status().connected,
+      closeSetup: (nonce, signal) => chromeConnection().send({ kind: 'finish-setup', nonce }, { signal }),
+      cancel: task => browserActions.cancel(task),
+    },
     workflow: buildWorkflows(),
     llm: () => guideLlm(),
     actions,
@@ -4143,7 +4238,10 @@ const typingSession = createDictationSession({
     if (phase === 'idle' && !harness.active && !selection && !tasksPanelOpen && !(agent && agent.active()) && !(guide && guide.active())) disarmEsc();
   },
 });
-app.on('before-quit', () => typingSession.stop('hidden'));
+app.on('before-quit', () => {
+  typingSession.stop('hidden');
+  if (chromeBridge) void chromeBridge.disconnect();
+});
 
 function typingOwnsMic() { return typingSession.state() === 'active' || typingSession.state() === 'starting'; }
 
@@ -5002,6 +5100,7 @@ async function routeUtterance(text, source, heard, uttId, assignmentAlreadyCheck
   // "Open Instagram" with the focus guard on: one line, and nothing opens.
   if (refusedByGuard(text, source, heardAt)) return;
   if (agent && agent.active()) { routeUtteranceSlow(text, source, heardAt); return; }
+  if (await routeEnhancedHands(text, source, heardAt)) return;
   if (routeWorkflow(text, source, heardAt)) return;
   // "Turn on Hands", "island mode off", "sound cues on": the Companion's own
   // switches, by voice, no model (live 2026-11-03: "turn on hands" went to the
@@ -5944,6 +6043,7 @@ function initCompanion(providedHooks = {}) {
   hooks = providedHooks;
   routeLog(store.statusLine());
   STANDALONE = hooks.standalone === true;
+  if (STANDALONE && store.getSettings().chromeAutomation) void chromeConnection().enable();
   if (STANDALONE) OPEN_MIC = store.getSettings().openMic ?? (process.env.KAASHIFY_REFLEX_OPENMIC === '1');
 
   const allowMedia = (webContents, permission, types, details) => {
@@ -6008,6 +6108,9 @@ function initCompanion(providedHooks = {}) {
 
   return {
     // Smoke runs only: build the Hands agent and read the screen once. No clicks.
+    chromeStatus: () => chromeConnection().status(),
+    chromeConnect: () => connectChrome(),
+    chromeDisconnect: disconnectChrome,
     handsCheck: async () => { const a = getAgent(); const s = await handsRead(); return { agent: Boolean(a), probe: probeReady(), fg: s.fg ? { process: s.fg.process || '', title: String(s.fg.title || '').slice(0, 40), hwnd: Boolean(s.fg.hwnd) } : null, elements: s.elements.length, boxed: s.elements.filter((e) => e.box).length, capture: Boolean(s.cap), apps: handsAppList().length }; },
     show: forceShow,
     startTour: (from) => { forceShow(); tourStart(from || 'home'); return companionStatus(); },

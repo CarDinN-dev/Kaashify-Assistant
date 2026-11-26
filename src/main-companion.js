@@ -266,6 +266,9 @@ function registerHomeIpc() {
   });
   handle('home:settings:get', publicSettings);
   handle('home:settings:set', settingsPatch);
+  handle('home:chrome:status', () => companion.chromeStatus());
+  handle('home:chrome:connect', () => companion.chromeConnect());
+  handle('home:chrome:disconnect', () => companion.chromeDisconnect());
   // Share my week: the picture the dashboard drew, to the clipboard and to
   // Pictures\Kaashify. Only a PNG data URL is accepted; nothing is uploaded.
   handle('home:share-card', dataUrl => {
@@ -418,6 +421,7 @@ app.whenReady().then(async () => {
     onStateChange: s => send('home:state',s), getDesktopState: lifestyleSnapshot, folderContext: q => folders.context(q),
     // The dashboard's live view: a setting changed anywhere, a task moved, the pill's word.
     onSettingsChanged: () => send('home:settings', publicSettings()),
+    onChromeStatus: value => send('home:chrome', value),
     onTaskEvent: p => send('home:tasks', p),
     onKnotWord: w => send('home:knot', w),
     autostart: { enabled: () => store.getSettings().startWithWindows === true, set: on => settingsPatch({ startWithWindows: !!on }) },

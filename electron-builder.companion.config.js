@@ -81,6 +81,7 @@ module.exports = {
     artifactName: 'Kaashify-Setup.${ext}',
     ...(base.win.azureSignOptions ? { azureSignOptions: base.win.azureSignOptions } : {}),
     extraResources: [...base.win.extraResources,
+      { from: 'build/chrome', to: 'chrome', filter: ['KaashifyChromeHost.exe', 'LICENSE-Go'] },
       { from: 'companion/src/reflex', to: 'win', filter: ['hands.ps1'] },
       // Fable, the Knot's own voice (Kokoro v1.0 via sherpa-onnx, Apache-2.0; espeak-ng-data is
       // GPL-3.0, see THIRD-PARTY.md), so the first word is Fable with no download. The English files only.

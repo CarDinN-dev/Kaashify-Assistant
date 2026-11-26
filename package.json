@@ -13,6 +13,7 @@
     "start:companion": "electron src/main-companion.js",
     "smoke:companion": "electron src/main-companion.js --smoke",
     "voice:lines": "node scripts/make-voice-lines.js",
+    "predist:companion": "node scripts/build-chrome-host.js",
     "dist:companion": "node scripts/make-voice-lines.js && electron-builder --win --config electron-builder.companion.config.js --publish never",
     "dist:check:companion": "node scripts/package-security-check.js --profile=companion",
     "dist:companion:mac": "electron-builder --mac --config electron-builder.companion.config.js --publish never"

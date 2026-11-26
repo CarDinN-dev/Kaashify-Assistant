@@ -21,6 +21,7 @@ const { SYSTEM, userTurn } = require('./prompt');
 const { AgentStream } = require('./reply');
 const { settleSignature } = require('../guide/settle');
 const { plainAskError } = require('../ask-error');
+const { frontIs } = require('./actions');
 const { FOLLOW_UP, workflowRequest } = require('./workflows');
 
 const MAX_STEPS = 15;
@@ -53,6 +54,7 @@ function isSwitcher(fg) {
 // open coming to the front now stops the task instead.
 const OPENERS = new Set(['open_app', 'open_url', 'web_search', 'open_file']);
 const OPEN_GRACE_READS = 3;        // looks after an opener in which a new app may come to the front
+function windowKey(fg) { return fg?.hwnd && fg?.pid ? fg.pid + ':' + fg.hwnd : ''; }
 function appOf(fg) { return fg ? String(fg.process || '').toLowerCase() : ''; }
 
 function withTimeout(promise, ms, label) {
@@ -121,7 +123,7 @@ class HandsAgent {
 
   // "Keep going" after the step budget ran out: the same task, picking up
   // where it stopped, for a few minutes after.
-  canResume() { return Boolean(this.last && (this.last.outcome === 'budget' || this.last.outcome === 'away') && this.d.now() - this.last.endedAt < RESUME_WINDOW_MS); }
+  canResume() { return Boolean(this.last && !this.last.compound && (this.last.outcome === 'budget' || this.last.outcome === 'away') && this.d.now() - this.last.endedAt < RESUME_WINDOW_MS); }
   resume(source, opts = {}) {
     if (!this.canResume()) return false;
     const L = this.last;
@@ -131,7 +133,7 @@ class HandsAgent {
 
   // "Enter the recipient as ..." just after a run: more of the same task, with
   // what was done so far, not a new one. Not after a stop, a no or a failure.
-  canFollowUp() { return Boolean(this.last && ['ok', 'budget', 'away', 'asked'].includes(this.last.outcome) && this.d.now() - this.last.endedAt < FOLLOW_UP_WINDOW_MS); }
+  canFollowUp() { return Boolean(this.last && !this.last.compound && ['ok', 'budget', 'away', 'asked'].includes(this.last.outcome) && this.d.now() - this.last.endedAt < FOLLOW_UP_WINDOW_MS); }
   followUp(words, source, opts = {}) {
     if (!this.canFollowUp()) return false;
     const L = this.last;
@@ -148,11 +150,12 @@ class HandsAgent {
     const gen = ++this.gen;
     this.runId++;
     const t0 = this.d.now();
-    this.task = { request: text, goal: opts.goal || text, source: source || 'typed', askedAt: opts.askedAt || t0, history: Array.isArray(opts.history) ? opts.history.slice() : [], steps: 0, spoke: false, apps: new Set(), openGrace: 0, repeats: new Map(), budget: this.d.maxSteps, rejections: 0, lastSig: null, sameScreen: 0, files: null, outcome: 'ok', note: '' };
+    const compound = opts.compound || this.d.compound?.(text);
+    this.task = { controller: new AbortController(), compound, completed: new Set(), sourceData: '', allowedWindows: new Set(), request: text, goal: opts.goal || text, source: source || 'typed', askedAt: opts.askedAt || t0, history: Array.isArray(opts.history) ? opts.history.slice() : [], steps: 0, spoke: false, apps: new Set(), openGrace: 0, repeats: new Map(), budget: this.d.maxSteps, rejections: 0, lastSig: null, sameScreen: 0, files: null, outcome: 'ok', note: '' };
     this.setState('running');
     this.d.log('run started');
     try {
-      const workflow = this.d.workflow && (opts.workflow || workflowRequest(text));
+      const workflow = this.d.workflow && !compound && (opts.workflow || workflowRequest(text));
       if (workflow) {
         this.task.workflow = workflow;
         const ctl = new AbortController();
@@ -164,23 +167,89 @@ class HandsAgent {
             this.finish(done.outcome, done.text);
           }
         } finally { if (this.abort === ctl) this.abort = null; }
-      } else await this.loop(gen);
+      } else {
+        if (this.d.chromeSetup) await this.setupChrome(gen);
+        if (gen === this.gen) await this.loop(gen);
+      }
     }
     catch (e) { if (gen === this.gen) { this.d.log('loop failed: ' + e.message); this.finish('error', 'I could not keep going (' + clip(e.message, 120) + ').'); } }
     return true;
   }
 
+  async setupChrome(gen) {
+    const setup = this.d.chromeSetup;
+    const task = this.task;
+    if (!setup) return;
+    const fg = await setup.foreground?.();
+    if (gen !== this.gen || !setup.needed(task.request, fg)) return;
+    const accepted = await this.askFirst({
+      title: 'Set up Chrome for this task?',
+      detail: 'Confirm the extension in Chrome. Kaashify will pick up the task when it connects.',
+      confirmLabel: 'Set up Chrome', declineLabel: 'Use Windows controls', firm: true,
+    }, { name: 'chrome-setup' }, gen);
+    if (gen !== this.gen) return;
+    if (!accepted) { task.chromeFallback = true; return; }
+    const signal = task.controller.signal;
+    const result = await setup.connect({ signal });
+    if (gen !== this.gen) return;
+    if (!result.ok) {
+      task.chromeFallback = true;
+      this.d.send('status', { message: 'Chrome setup could not open. I’ll try Windows controls.' });
+      return;
+    }
+    if (!setup.ready()) this.d.send('guide:hint', { text: 'Waiting for the Chrome extension to connect…', ms: 120000 });
+    for (let attempt = 0; attempt < 120 && gen === this.gen && !setup.ready(); attempt++) await this.d.sleep(1000);
+    if (gen !== this.gen) return;
+    if (!setup.ready()) {
+      this.finish('asked', 'Chrome did not connect. Finish setup in Chrome or reconnect from Settings, then ask again.');
+      return;
+    }
+    if (result.opened) {
+      const closed = await setup.closeSetup(result.nonce, signal);
+      if (gen !== this.gen) return;
+      if (!closed?.ok) {
+        this.finish('asked', 'Chrome is connected. Return to the task tab, then ask again.');
+        return;
+      }
+    }
+    this.d.send('guide:hint', { text: 'Chrome connected. Continuing your task.', ms: 3500 });
+  }
+
+  async prepareStep(args, task) {
+    const chosen = task.compound?.workflows.find(step => step.id === args.id);
+    if (!chosen || task.completed.has(chosen.id) || !this.d.workflow) {
+      return { ok: false, report: 'Choose an unfinished preparation step from the user’s request.' };
+    }
+    const remaining = task.compound.workflows.find(step => !task.completed.has(step.id));
+    if (remaining !== chosen) return { ok: false, report: 'Prepare that item in the order requested.' };
+    const done = await this.d.workflow.run(chosen.spec, chosen.request, {
+      signal: task.controller.signal, sourceData: task.sourceData,
+    });
+    if (done.outcome !== 'ok') return { ok: false, guarded: true, report: done.text };
+    task.completed.add(chosen.id);
+    if (done.target?.hwnd && done.target?.pid) task.allowedWindows.add(windowKey(done.target));
+    return { ok: true, report: done.text, noLook: true, needsObservation: true };
+  }
+
   async loop(gen) {
     const T = this.task;
     for (let step = 0; gen === this.gen && this.active(); step++) {
-      if (T.steps >= T.budget) { this.finish('budget', 'That is as far as I got in one go. Say "keep going" to continue.'); return; }
-      let screen = await this.d.read();
+      if (T.steps >= T.budget) { this.finish('budget', T.compound ? 'I reached the task limit. Check the open apps and ask for the remaining steps.' : 'That is as far as I got in one go. Say "keep going" to continue.'); return; }
+      let screen = await this.d.read(T);
       if (gen !== this.gen) return;
       // A window with no readable controls (the phantom "Settings" seen at the
       // start of voice tasks) or the bare desktop neither becomes the task's
       // app nor stops it.
       const app = appOf(screen.fg);
       const real = app && !isSwitcher(screen.fg) && !/^program manager$/i.test(String(screen.fg.title || '').trim()) && (screen.elements || []).length > 0;
+      const key = windowKey(screen.fg);
+      if (this.d.oneActionPerLook && key && !isSwitcher(screen.fg)) {
+        if (!T.allowedWindows.size) T.allowedWindows.add(key);
+        if (!T.allowedWindows.has(key)) {
+          this.finish('away', 'A different window came to the front. Return to the task window and ask again.');
+          return;
+        }
+      }
       if (real) {
         if (!T.apps.size || T.openGrace > 0) T.apps.add(app);
         else if (!T.apps.has(app)) {
@@ -190,6 +259,10 @@ class HandsAgent {
         }
       }
       if (T.openGrace > 0) T.openGrace--;
+      if (T.chromeStarted && ['target-changed', 'browser-unavailable'].includes(screen.chrome?.blocked)) {
+        this.finish('away', 'Chrome changed or disconnected. Return to the task tab and ask again.');
+        return;
+      }
       const sig = (screen.fg ? (screen.fg.title || '') + '|' : '') + settleSignature(screen.elements);
       T.sameScreen = sig === T.lastSig ? T.sameScreen + 1 : 0;
       T.lastSig = sig;
@@ -197,7 +270,9 @@ class HandsAgent {
       if (T.sameScreen >= 2) note = (note ? note + ' ' : '') + 'Nothing on screen has changed for two steps: do something genuinely different, or stop and say what is in the way.';
       const llm = this.d.llm();
       if (!llm || !llm.ready) { this.finish('error', 'No AI is set up, so I cannot do that. Add a key or sign in to Claude Code in Settings.'); return; }
-      const prompt = userTurn({ goal: T.goal, request: T.request, window: screen.fg ? { title: screen.fg.title, process: screen.fg.process } : null, elements: screen.elements, history: T.history, note, memory: this.d.memoryBlock() });
+      const prompt = userTurn({ goal: T.goal, request: T.request, window: screen.fg ? { title: screen.fg.title, process: screen.fg.process } : null, elements: screen.elements, history: T.history, note, memory: this.d.memoryBlock(),
+        chrome: screen.chrome && !screen.chrome.blocked ? screen.chrome : null, sourceData: T.sourceData,
+        verified: this.d.oneActionPerLook, preparation: T.compound?.workflows.map(step => ({ id: step.id, kind: step.spec.kind, done: T.completed.has(step.id), request: step.request })) });
       const rs = new AgentStream();
       let said = 0;
       const onDelta = (piece) => { if (gen !== this.gen) return; for (const s of rs.feed(piece)) this.d.speak(s, said++ === 0); };
@@ -221,15 +296,16 @@ class HandsAgent {
       const prose = reply.prose() || clip(String(raw || '').replace(/\[[^\]]*\]/g, ''), 200);
       const modelMs = this.d.now() - t0;
       this.d.log('step ' + (T.steps + 1) + ' model ' + modelMs + ' ms, ' + screen.elements.length + ' controls');
-      if (tags.goal && T.history.length === 0) T.goal = tags.goal;
+      if (!this.d.oneActionPerLook && tags.goal && T.history.length === 0) T.goal = tags.goal;
       if (tags.muted) this.d.log('model wrote tool markup as text; the rest of that reply was dropped');
       if (tags.emptyType) { this.d.log('model sent an empty type; dropped'); T.note = 'You sent [DO:type] with no text. Never do that: if you do not know what the user wants typed, ask them in one sentence, with no action.'; }
 
       // Carry out the actions in order; a card or a failure ends the chain.
-      const ctx = { elements: screen.elements, cap: screen.cap, originPhys: screen.originPhys, fg: screen.fg, files: T.files, browser: T.browser || null, target: T.target || null };
+      const ctx = { elements: screen.elements, cap: screen.cap, originPhys: screen.originPhys, fg: screen.fg, files: T.files, browser: T.browser || null, target: T.target || null, chrome: screen.chrome, task: T, strict: this.d.oneActionPerLook };
       const results = [];
-      let halted = false, changed = null;
-      for (const action of tags.actions) {
+      let halted = false, changed = null, needsObservation = false;
+      const actions = this.d.oneActionPerLook ? tags.actions.slice(0, 1) : tags.actions;
+      for (const action of actions) {
         if (gen !== this.gen) return;
         const key = action.name + ' ' + JSON.stringify(action.args || {});
         const n = (T.repeats.get(key) || 0) + 1; T.repeats.set(key, n);
@@ -243,8 +319,10 @@ class HandsAgent {
           const answered = await this.askFirst(card, action, gen);
           if (gen !== this.gen) return;
           if (!answered) { T.outcome = 'declined'; this.finish('declined', 'Okay, not doing that.'); return; }
+          this.d.releaseFocus?.();
+          ctx.approved = true;
           if (ctx.fg?.hwnd && ['click', 'type', 'press', 'drag'].includes(action.name)) {
-            const fresh = await this.d.read();
+            const fresh = await this.d.read(T);
             if (gen !== this.gen) return;
             const nextCard = this.cardFor(action, { ...ctx, ...fresh });
             if (fresh.fg?.hwnd !== ctx.fg.hwnd || nextCard?.title !== card.title || nextCard?.detail !== card.detail) {
@@ -255,12 +333,24 @@ class HandsAgent {
             screen = fresh;
           }
         }
-        const r = await this.d.actions.run(action.name, action.args, ctx);
+        if (action.name === 'prepare_step') this.d.onPrepare?.(action.args, ctx);
+        const r = action.name === 'prepare_step' ? await this.prepareStep(action.args, T)
+          : await this.d.actions.run(action.name, action.args, ctx);
         if (gen !== this.gen) return;
         if (ctx.files) T.files = ctx.files;
         if (ctx.browser) T.browser = ctx.browser;
         if (ctx.target) T.target = ctx.target;
-        if (r.ok && OPENERS.has(action.name)) T.openGrace = OPEN_GRACE_READS;
+        if (r.ok && (OPENERS.has(action.name) || action.name === 'prepare_step')) {
+          T.openGrace = OPEN_GRACE_READS;
+          if (windowKey(ctx.fg) && ctx.target && frontIs(ctx.fg, ctx.target)) T.allowedWindows.add(windowKey(ctx.fg));
+          if (!screen.chrome && ctx.target?.process === 'chrome' && ['open_url', 'web_search'].includes(action.name)) {
+            this.d.chromeSetup?.cancel(T);
+            T.chromeId = undefined;
+            T.chromeStarted = false;
+          }
+        }
+        if (r.sourceData) T.sourceData = String(r.sourceData).slice(0, 2400);
+        needsObservation ||= Boolean(r.needsObservation);
         results.push({ action: action.name, ok: Boolean(r.ok), report: r.report || (r.ok ? 'done' : 'failed'), unverified: Boolean(r.unverified) });
         this.d.log('action ' + action.name + ': ' + (r.ok ? 'ok' : 'failed'));
         // Not a step to work around: the person asked to stay off this. The run ends on the line.
@@ -281,7 +371,11 @@ class HandsAgent {
       // A clearly progressing task earns a few more steps, once.
       if (T.steps === T.budget - 2 && results.length && results.every((x) => x.ok) && T.budget < MAX_STEPS + EXTRA_STEPS) T.budget += 5;
 
-      if (tags.done && !halted) {
+      if (tags.done && !halted && !needsObservation && actions.length === tags.actions.length) {
+        if (T.compound && T.completed.size !== T.compound.workflows.length) {
+          T.note = 'The user requested more preparation steps. Continue in their original order.';
+          continue;
+        }
         // Believe "done" only when the last action reported fine and, after a click, the screen moved.
         const lastRes = results.length ? results[results.length - 1] : null;
         const lastClick = lastRes && ['click', 'press', 'type'].includes(lastRes.action);
@@ -312,7 +406,8 @@ class HandsAgent {
       if (action.name === 'drag') { const el = this.d.actions.findElement ? this.d.actions.findElement({ id: action.args.to_id, text: action.args.to_text }, ctx.elements) : null; if (el) toName = el.name || ''; }
       if (action.name === 'open_file') { const hit = ctx.files && ctx.files[Number(action.args.index) - 1]; if (hit) fileName = hit.name || ''; }
     } catch (_) { /* a name is a courtesy */ }
-    return this.d.consent.preview(action, { targetName, fieldName, toName, fileName, windowTitle: ctx.fg ? ctx.fg.title : '', nearby: '' });
+    const card = this.d.consent.preview(action, { targetName, fieldName, toName, fileName, windowTitle: ctx.fg ? ctx.fg.title : '', nearby: '' });
+    return card && this.d.oneActionPerLook ? { ...card, firm: true } : card;
   }
 
   // The card by Kaashify: Yes or Not now, or a spoken answer. Resolves true on yes.
@@ -320,9 +415,9 @@ class HandsAgent {
     const T = this.task;
     this.setState('asking');
     const sessionId = this.bubbleId() + ':' + ++this.confirmationSequence;
-    const spoken = card.title + (card.detail ? ' ' + card.detail : '') + (card.firm ? ' Press Yes to go ahead.' : ' Say yes to go ahead.');
+    const spoken = card.title + (card.detail ? ' ' + card.detail : '') + (card.firm ? ' Press ' + (card.confirmLabel || 'Yes') + ' to go ahead.' : ' Say yes to go ahead.');
     const answer = this.d.consent.pending.ask(card, action, { sessionId });
-    this.d.send('guide:bubble', { text: card.title, hint: card.detail || '', kicker: 'ask first', anchor: 'knot', task: 'hands', actions: [{ id: 'hands-yes', label: 'Yes', primary: true }, { id: 'hands-no', label: 'Not now' }], sessionId, speak: T.source === 'voice' ? spoken : undefined });
+    this.d.send('guide:bubble', { text: card.title, hint: card.detail || '', kicker: 'ask first', anchor: 'knot', task: 'hands', actions: [{ id: 'hands-yes', label: card.confirmLabel || 'Yes', primary: true }, { id: 'hands-no', label: card.declineLabel || 'Not now' }], sessionId, speak: T.source === 'voice' ? spoken : undefined });
     const ans = await answer;
     if (gen !== this.gen) return false;
     this.setState('running');
@@ -354,12 +449,14 @@ class HandsAgent {
     const T = this.task;
     if (!T) return;
     T.outcome = outcome;
+    T.controller?.abort();
+    this.d.chromeSetup?.cancel(T);
     this.d.retract();
     if (text) this.d.send('guide:bubble', { text, anchor: 'knot', task: 'hands', kicker: outcome === 'ok' ? 'done' : outcome === 'declined' || outcome === 'away' || outcome === 'guarded' ? 'stopped' : '', kind: outcome === 'error' ? 'error' : '', actions: [{ id: 'dismiss', label: 'OK' }], sessionId: this.bubbleId(), speak: T.source === 'voice' && !opts.quiet ? text : undefined });
     this.d.log('finish ' + outcome + ' after ' + T.history.length + ' steps');
     this.gen++;
     this.state = 'idle';
-    this.last = { goal: T.goal, request: T.request, source: T.source, outcome, steps: T.history.length, history: T.history.slice(-HISTORY_CARRY), endedAt: this.d.now(), workflow: T.workflow, workflowTarget: T.workflowTarget };
+    this.last = { goal: T.goal, request: T.request, source: T.source, outcome, steps: T.history.length, history: T.history.slice(-HISTORY_CARRY), endedAt: this.d.now(), workflow: T.workflow, workflowTarget: T.workflowTarget, ...(T.compound ? { compound: true } : {}) };
     this.task = null;
     this.d.send('guide:state', { state: 'idle', task: 'hands' });
     try { this.d.onActive(false); } catch (_) { /* a hook never breaks the loop */ }

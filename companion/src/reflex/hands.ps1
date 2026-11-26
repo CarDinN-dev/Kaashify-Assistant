@@ -33,6 +33,13 @@ public static class KaashifyHands {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder s, int n);
   public static string Title(IntPtr h) { var sb = new System.Text.StringBuilder(1024); GetWindowTextW(h, sb, 1024); return sb.ToString(); }
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [StructLayout(LayoutKind.Sequential)] public struct XY { public int X, Y; public XY(int x, int y) { X = x; Y = y; } }
+  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(XY point);
+  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+  public static bool PointInWindow(int x, int y, IntPtr hwnd) {
+    IntPtr hit = WindowFromPoint(new XY(x, y));
+    return hit != IntPtr.Zero && (hit == hwnd || GetAncestor(hit, 2) == hwnd);
+  }
   public static uint FgPid() { uint p = 0; GetWindowThreadProcessId(GetForegroundWindow(), out p); return p; }
   // Windows only lets a process take the foreground if it just received input.
   // A tap of Alt is that input; it is the documented way round the focus lock.
@@ -168,6 +175,17 @@ function Ensure-Target($req) {
   return @{ ours = ($self -ne 0 -and [KaashifyHands]::FgPid() -eq $self); window = [KaashifyHands]::Title($fg); focus = $name; focusType = $type; refocused = $refocused }
 }
 
+function Confirm-Window($req) {
+  if (-not $req.hwnd -or -not $req.targetPid -or -not $req.deadline) { return $false }
+  $h = [IntPtr][int64]$req.hwnd
+  return ([KaashifyHands]::GetForegroundWindow() -eq $h -and [KaashifyHands]::FgPid() -eq [uint32]$req.targetPid -and
+    [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -le [int64]$req.deadline)
+}
+function Confirm-Point($req, [int]$x, [int]$y) {
+  if (-not (Confirm-Window $req)) { return $false }
+  return [KaashifyHands]::PointInWindow($x, $y, [IntPtr][int64]$req.hwnd)
+}
+
 # Hands-free dictation must never activate a window or type into a password field.
 function Confirm-DictationTarget($req) {
   if (-not $req.hwnd -or -not $req.targetPid -or -not $req.deadline) { return $false }
@@ -238,6 +256,7 @@ function Handle($req) {
       $vks = @($req.keys | ForEach-Object { [int]$_ })
       if ($vks.Count -lt 1 -or $vks.Count -gt 4) { return @{ ok=$false; error='1 to 4 keys' } }
       foreach ($v in $vks) { if ($AllowedVk -notcontains $v) { return @{ ok=$false; error=('key not allowed: ' + $v) } } }
+      if ($req.strictForeground -and -not (Confirm-Window $req)) { return @{ok=$false; reason='focus'} }
       [KaashifyHands]::Chord([int[]]$vks)
       return @{ ok=$true }
     }
@@ -288,6 +307,7 @@ function Handle($req) {
       try { $el = $AE::FromPoint((New-Object System.Windows.Point($x, $y))); if ($el) { $secure = [bool]$el.Current.IsPassword } } catch {}
       if ($secure) { return @{ ok=$false; refused='password' } }
       $button = [string]$req.button; if (-not $button) { $button = 'left' }
+      if ($req.strictForeground -and -not (Confirm-Point $req $x $y)) { return @{ok=$false; reason='focus'} }
       [KaashifyHands]::Click($x, $y, $button, [bool]$req.double)
       return @{ ok=$true; x=$x; y=$y; button=$button }
     }
@@ -295,10 +315,13 @@ function Handle($req) {
     'mouse.scroll' {
       $dy = [int]$req.dy; $dx = [int]$req.dx
       if ([math]::Abs($dy) -gt 20 -or [math]::Abs($dx) -gt 20) { return @{ ok=$false; error='scroll too far' } }
+      if ($req.strictForeground -and -not (Confirm-Point $req ([int]$req.x) ([int]$req.y))) { return @{ok=$false; reason='focus'} }
       [KaashifyHands]::Scroll([int]$req.x, [int]$req.y, $dy, $dx)
       return @{ ok=$true }
     }
     'mouse.drag' {
+      if ($req.strictForeground -and (-not (Confirm-Point $req ([int]$req.x0) ([int]$req.y0)) -or
+          -not (Confirm-Point $req ([int]$req.x1) ([int]$req.y1)))) { return @{ok=$false; reason='focus'} }
       [KaashifyHands]::Drag([int]$req.x0, [int]$req.y0, [int]$req.x1, [int]$req.y1, 20)
       return @{ ok=$true }
     }
@@ -320,6 +343,7 @@ function Handle($req) {
       foreach ($v in $vks) { if ($PressVk -notcontains $v) { return @{ ok=$false; error=('key not allowed: ' + $v) } } }
       $where = Ensure-Target $req
       if ($where.ours) { return @{ ok=$false; error='the keys would have gone to Kaashify itself'; window=$where.window } }
+      if ($req.strictForeground -and -not (Confirm-Window $req)) { return @{ok=$false; reason='focus'} }
       [KaashifyHands]::Chord([int[]]$vks)
       return @{ ok=$true; window=$where.window; focus=$where.focus; focusType=$where.focusType; refocused=$where.refocused }
     }

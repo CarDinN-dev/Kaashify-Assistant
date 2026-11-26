@@ -46,3 +46,8 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 
 Parakeet TDT 0.6B v3
 The Kaashify's optional larger speech model is nvidia/parakeet-tdt-0.6b-v3 by NVIDIA (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), licensed under CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/). It is not bundled: it is downloaded only when a person switches it on in Settings, in the int8 ONNX form published by the sherpa-onnx project (https://github.com/k2-fsa/sherpa-onnx), which quantized and converted it from NVIDIA's original. The Companion runs that file unchanged.
+
+---
+
+The Windows Chrome Native Messaging helper uses the Go standard library and runtime. The Go
+project's BSD license ships next to the helper in `resources/chrome/LICENSE-Go`.

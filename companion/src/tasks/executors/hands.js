@@ -46,6 +46,10 @@ function stepLine(action, ctx, agent) {
     case 'open_app': return 'Opening ' + clip(a.name || 'an app', 40);
     case 'open_url': return 'Opening a page';
     case 'web_search': return 'Searching the web';
+    case 'prepare_step': {
+      const kind = ctx?.task?.compound?.workflows.find(step => step.id === a.id)?.spec.kind;
+      return { document: 'Preparing the document', email: 'Drafting the email', survey: 'Filling the survey' }[kind] || 'Preparing the next app';
+    }
     case 'find_files': return 'Looking for a file';
     case 'open_file': return 'Opening a file';
     case 'wait': return 'Waiting';
@@ -82,17 +86,22 @@ function createHandsExecutor({ agent: getAgent, now, setTimer, clearTimer, log, 
     wrapped = agent;
     const d = agent.d;
     const read = d.read;
-    d.read = async () => { const screen = await read(); if (live && live.agent === agent) live.lastRead = screen; return screen; };
+    d.read = async (...args) => { const screen = await read(...args); if (live && live.agent === agent) live.lastRead = screen; return screen; };
     const actions = d.actions, runAction = actions.run.bind(actions);
+    function reportAction(name, args, ctx) {
+      if (!live || live.agent !== agent) return;
+      live.steps++;
+      const T = agent.task;
+      noteAction(name, args, ctx, T);
+      live.ctx.emit('step', { n: (live.base || 0) + (T ? T.steps + 1 : live.steps), total: null,
+        line: stepLine({ name, args }, ctx, agent), goal: T ? scrubTyped(T.goal, live.typed) : '',
+        ask: T ? scrubTyped(T.request, live.typed) : '' });
+    }
     actions.run = (name, args, ctx) => {
-      if (live && live.agent === agent) {
-        live.steps++;
-        const T = agent.task;
-        noteAction(name, args, ctx, T);
-        live.ctx.emit('step', { n: (live.base || 0) + (T ? T.steps + 1 : live.steps), total: null, line: stepLine({ name, args }, ctx, agent), goal: T ? scrubTyped(T.goal, live.typed) : '', ask: T ? scrubTyped(T.request, live.typed) : '' });
-      }
+      reportAction(name, args, ctx);
       return runAction(name, args, ctx);
     };
+    d.onPrepare = (args, ctx) => reportAction('prepare_step', args, ctx);
     if (d.consent && d.consent.pending) {
       const pending = d.consent.pending, askCard = pending.ask.bind(pending);
       pending.ask = (card, action, ctx) => {
@@ -100,7 +109,10 @@ function createHandsExecutor({ agent: getAgent, now, setTimer, clearTimer, log, 
         if (live && live.agent === agent) {
           const id = ctx.sessionId;
           live.cardId = id;
-          live.ctx.emit('needs_input', { id, kind: 'consent', text: card.title, hint: card.detail || '', options: CONSENT_OPTIONS });
+          const options = card.confirmLabel ? CONSENT_OPTIONS.map((option, index) => ({
+            ...option, label: (index ? card.declineLabel : card.confirmLabel) || option.label,
+          })) : CONSENT_OPTIONS;
+          live.ctx.emit('needs_input', { id, kind: 'consent', text: card.title, hint: card.detail || '', options });
           p.then((ans) => { if (live && live.cardId === id) { live.cardId = null; live.ctx.emit('answered', { id, value: ans && ans.answered ? Boolean(ans.yes) : null, how: ans ? (ans.answered ? ans.how : ans.reason || 'cancelled') : 'cancelled' }); } }, () => {});
         }
         return p;
@@ -175,6 +187,10 @@ function createHandsExecutor({ agent: getAgent, now, setTimer, clearTimer, log, 
       ctx.emit('started', {});
       // Queued, or reopened from a project, before the guard came on: it does not run now.
       if (typeof refuse === 'function' && refuse(task)) { ctx.emit('cancelled', { reason: 'guarded' }); return; }
+      if (ctx.resumed && agent.d.compound?.(task.request)) {
+        ctx.emit('failed', { class: 'interrupted', detail: 'Check the open apps and ask for the remaining steps.', retryable: false });
+        return;
+      }
       const source = task.source === 'voice' ? 'voice' : 'typed';
       // Picked up after a restart: the model is told how far the last run got,
       // so it looks at the screen and does not redo finished steps.
@@ -189,6 +205,10 @@ function createHandsExecutor({ agent: getAgent, now, setTimer, clearTimer, log, 
         const last = agent.last || {};
         const outcome = String(last.outcome || 'ok');
         const text = live.lastText;
+        if (last.compound && ['budget', 'away', 'asked', 'stuck'].includes(outcome)) {
+          ctx.emit('failed', { class: 'interrupted', detail: text || 'Review the open apps before requesting the remaining steps.', retryable: false });
+          return;
+        }
         if (outcome === 'budget' || outcome === 'away') {
           const h = await hold(text || 'That is as far as I got in one go.');
           if (ctx.signal && ctx.signal.aborted) return;

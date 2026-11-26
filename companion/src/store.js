@@ -30,6 +30,8 @@ const DEFAULTS = {
   speakReplies: false,
   apiSpeech: false,
   wakeCommands: false,
+  chromeAutomation: false,
+  chromeProfile: '',
   // Explicit opt-in. When false, the Companion can show that Kaashify is linked but
   // never sends the shared semester snapshot to an external model provider.
   shareNusContextWithProvider: false,
@@ -330,7 +332,7 @@ function save() {
 }
 
 function rendererSettings(settings = load()) {
-  const { apiKeys, ...preferences } = settings;
+  const { apiKeys, chromeProfile, ...preferences } = settings;
   return {
     ...preferences,
     keys: Object.fromEntries(Object.keys(DEFAULTS.apiKeys).map(key => [key, Boolean(apiKeys?.[key])])),
