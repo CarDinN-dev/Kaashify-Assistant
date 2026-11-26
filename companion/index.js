@@ -53,14 +53,15 @@ const { parseRecallAsk } = require('./src/recall/asks');
 const { createEmbedder } = require('./src/recall/embed');
 const { createImportWatcher } = require('./src/recall/watcher');
 const { readExportZip, importedLine } = require('./src/recall/ingest');
-const { needsScreen, isTask, carriesText, handsTakes, launchClause, rewriteAsk, readsPage, greeting, messageAsk, bareLaunch, fieldFollowUp, endsMidPhrase, trimCutOff } = require('./src/reflex/rules');
+const { needsScreen, isTask, carriesText, handsTakes, launchClause, rewriteAsk, readsPage, greeting, messageAsk, bareLaunch, launchName, fieldFollowUp, endsMidPhrase, trimCutOff } = require('./src/reflex/rules');
 const { buildPageAsk, preparePage } = require('./src/page-read');
 const { screenAsk, vagueAsk, CLARIFY_LINE } = require('./src/guide/screen-ask');
 const { findAsk, locate, growToItem, foundLine } = require('./src/guide/find');
 const { rewriteInPlace } = require('./src/rewrite');
 const { parseReminder, createReminders, whenLabel, durationWords, describeList, panelRows: reminderRows } = require('./src/reminders');
 const { HandsAgent, isSwitcher } = require('./src/hands/agent');
-const { createActions, createFileSearch, createBrowserLaunch, createDefaultBrowser } = require('./src/hands/actions');
+const { createActions, createFileSearch, createBrowserLaunch, createDefaultBrowser, browserFor } = require('./src/hands/actions');
+const { createWorkflows, workflowRequest, manualFinishRequest } = require('./src/hands/workflows');
 const handsConsent = require('./src/hands/consent');
 const Tour = require('./src/tour');
 const Hello = require('./src/hello');
@@ -1743,11 +1744,13 @@ function registerIpc() {
     if (p && (p.action === 'hands-yes' || p.action === 'hands-no')) { if (agent) agent.answerFromBubble(p.action === 'hands-yes', p.sessionId); return; }
     // A task card's buttons (the pill's list, or a bubble from an executor
     // that does not paint for itself): the answer goes through the supervisor.
+    if (p && p.action && /^app-choice-/.test(String(p.action))) { chooseInstalledApp(p); return; }
     if (p && p.action && /^task-/.test(String(p.action))) { tasksAction(String(p.action), p); return; }
     if (p && p.action && agent && agent.active()) { if (p.action === 'dismiss' || p.action === 'notnow') stopHands(p.action); return; }
     if (p && p.action === 'copy-rewrite') { if (lastRewrite) { clipboard.writeText(lastRewrite); flash('Copied.', 1800); } guideDismiss('copied'); return; }
     if (p && p.action) { if (guide) guide.onAction(String(p.action)); return; }
     if (p && p.text && p.text.trim()) {
+      pendingAppChoices = null;
       if (!p.about && handleTypingCommand(p.text, 'typed')) return;
       if (supportCommand(p.text)) return;
       // "Move to the top left": Kaashify itself is being sent somewhere.
@@ -1761,12 +1764,13 @@ function registerIpc() {
       if (fileContext && Date.now() - fileContext.at > 300000) fileContext = null;
       if (p.about && fileContext) { answerFile(p.text); return; }
       if (refusedByGuard(p.text, p.source || 'typed', Date.now())) return;
+      if (!p.about && routeWorkflow(p.text, 'typed', Date.now())) return;
       if (!(agent && agent.active()) && routeProjectAsk(p.text, p.source || 'typed', Date.now())) return;
       // Say "working" before the first await: the assignment router is a Jev
       // round trip, and until it returns Kaashify used to sit silent.
       const wasActive = !!(guide && guide.active());
       if (!wasActive) send('guide:state', { state: 'thinking', task: 'guide' });
-      const localLaunch = !p.about && !wasActive && reflex?.enabled() && reflex.exactLaunchApp(p.text);
+      const localLaunch = !p.about && !wasActive && probeReady() && getReflex().enabled() && launchName(p.text);
       if (!localLaunch && await assignmentRoute(p.text, p.source || 'typed')) { if (!wasActive) restoreKnotState(); return; }
       if (state.busy) { send('llm:busy', {}); restoreKnotState(); return; }
       if (p.about && selection) { answerSelection(p.text); return; }
@@ -1935,6 +1939,27 @@ function routeLog(m) {
     if (size > HANDS_LOG_MAX) fs.writeFileSync(file, line); else fs.appendFileSync(file, line);
   } catch (_) { /* a log never breaks an ask */ }
 }
+let pendingAppChoices = null;
+let appChoiceSeq = 0;
+function chooseInstalledApp(payload) {
+  const choice = pendingAppChoices;
+  const i = Number(String(payload.action).slice('app-choice-'.length));
+  if (!choice || choice.id !== payload.sessionId || Date.now() > choice.until || !Number.isInteger(i) || !choice.apps[i]) return;
+  pendingAppChoices = null;
+  if (agent?.active() || typingOwnsMic() || !probeReady()) return;
+  if (win && !win.isDestroyed() && win.isFocused()) win.blur();
+  guideDismiss('app-choice');
+  getReflex().launchInstalled(choice.apps[i].appId).catch(() => flash('I could not open the selected app.', 3500));
+}
+function showAppChoices(apps) {
+  const visible = apps.slice(0, 5);
+  const id = 'app-choice:' + ++appChoiceSeq;
+  pendingAppChoices = { apps: visible, id, until: Date.now() + 45000 };
+  const actions = visible.map((a, i) => ({
+    id: 'app-choice-' + i, label: visible.filter((b) => a.name === b.name).length > 1 ? a.name + ' · ' + a.appId.split('!')[0].slice(-38) : a.name,
+  }));
+  send('guide:bubble', { text: 'Which app should I open?', hint: apps.length > 5 ? 'Use its full Start menu name if your app is missing here.' : '', anchor: 'knot', task: 'ask', actions, sessionId: id });
+}
 function getReflex() {
   if (!reflex) {
     reflex = createReflex({
@@ -1951,6 +1976,7 @@ function getReflex() {
         anchor: 'knot', task: 'ask', kicker: 'routine', actions: [{ id: 'dismiss', label: 'No' }], sessionId: null,
         speak: 'Want me to save that as a routine?'
       }),
+      onAppChoices: showAppChoices,
       onUnavailable: () => send('guide:hint', { text: 'Jev is unreachable right now. Try again in a moment.', ms: 4000 }),
       onOfferClosed: (how) => {
         send('guide:done', { sessionId: null, offerKeep: false });
@@ -2394,11 +2420,106 @@ const KEEP_GOING = /^(?:ok(?:ay)?[,.! ]+)?(?:keep going|go on|continue|carry on|
 function handsOn() { return process.platform === 'win32' && store.getSettings().hands === true; }
 // An ask Hands takes whole, before the reflex layer sees a clause of it:
 // several steps, or a task that names the app or site it happens in.
-function handsClaims(text) { return handsTakes(text, { hands: handsOn(), apps: handsAppNames() }); }
+function handsClaims(text) { return handsOn() && Boolean(workflowRequest(text)) || handsTakes(text, { hands: handsOn(), apps: handsAppNames() }); }
 // Words about a field of what Hands just made, within two minutes of it (the
 // agent keeps the task that long). The open mic never resumes a task.
 function handsFollowUp(text) { return Boolean(handsOn() && agent && !agent.active() && !OPEN_MIC && agent.canFollowUp() && fieldFollowUp(text)); }
 function handsAppNames() { try { return (handsAppList() || []).map((a) => a.name); } catch (_) { return []; } }
+function releaseWorkflowFocus() {
+  if (win && !win.isDestroyed() && win.isFocused()) win.blur();
+}
+function readWorkflow() {
+  if (!probeReady()) return Promise.resolve(null);
+  return probe.request('workflow.read', {}, 3000).catch(() => null);
+}
+function routeWorkflow(text, source, heardAt) {
+  if (agent?.active() || !['typed', 'voice'].includes(source)) return false;
+  const last = agent?.last;
+  const followupFinish = last?.workflow && ['email', 'survey'].includes(last.workflow.kind)
+    && Date.now() - last.endedAt < 5 * 60000 && /^\s*(?:please\s+)?(?:send|submit)(?: (?:it|this|that))?[.!?]*\s*$/i.test(text);
+  if (manualFinishRequest(text) || followupFinish) {
+    flash('Review the open draft or form, then send or submit it yourself.', 4500);
+    restoreKnotState();
+    return true;
+  }
+  const spec = workflowRequest(text);
+  if (!spec) return false;
+  if (!handsOn() || !probeReady()) {
+    flash(!handsOn() ? 'Turn on Hands in Settings to do this in the app.' : 'The Windows desktop helper is unavailable.', 4500);
+    restoreKnotState();
+    return true;
+  }
+  if (openMicSource(source)) { flash('Use Quick Ask to start a Hands task while Open mic is on.', 4000); return true; }
+  if (state.busy || typingOwnsMic() || dict.held || dict.busy) { flash('Finish the current task before starting another.', 3500); return true; }
+  if (guide?.active()) guide.dismiss('workflow');
+  releaseWorkflowFocus();
+  noteAsk(askModeFor(source), 'hands');
+  getAgent().run(text, source, { askedAt: heardAt, workflow: spec });
+  return true;
+}
+
+function buildWorkflows() {
+  const { execFile } = require('node:child_process');
+  const launchBrowser = createBrowserLaunch({ execFile });
+  const defaultBrowser = createDefaultBrowser({ execFile });
+  const strictKeys = (target, extra = {}) => ({
+    hwnd: target.hwnd, targetPid: target.pid, selfPid: process.pid,
+    strictForeground: true, deadline: Date.now() + 1800, ...extra,
+  });
+  const nativeEdit = ({ op, signal, ...args }) => {
+    if (signal?.aborted || !probeReady()) return Promise.resolve({ ok: false, reason: 'focus' });
+    return probe.request('workflow.edit', { ...args, action: op, deadline: Date.now() + 2200 }, 3600).catch(() => null);
+  };
+  const paste = (target, options) => getHands().request('keys.text', strictKeys(target, {
+    ...options, max: 10000, retype: false,
+  }), 3500).catch(() => null);
+  return createWorkflows({
+    read: readWorkflow,
+    edit: async (options) => {
+      const result = await nativeEdit(options);
+      if (result?.reason !== 'paste-needed' || options.signal?.aborted) return result;
+      const r = await paste(options.target, { text: options.value, controlRid: result.rid, workflowDocument: 'empty' });
+      return r?.verified === true ? { ok: true } : { ok: false, reason: 'unverified' };
+    },
+    draftModel: () => guideLlm({ workflow: true }),
+    screenModel: () => guideLlm({ workflow: true }),
+    capture: async (surface, signal) => {
+      if (signal.aborted) return null;
+      const cap = await captureAssignment({ foreground: () => probe.request('fg', {}, 900), bubbleRect: assignmentBubbleRect,
+        model: true, captureDisplay: captureAssignmentDisplay, electron: { screen, nativeImage } }).catch(() => null);
+      return cap?.foreground?.hwnd === surface.fg.hwnd ? cap.dataUrl : null;
+    },
+    pause: sleep,
+    progress: (line) => flash(line, 4500),
+    pasteDocument: async ({ target, rid, selection: selected, text, signal }) => {
+      if (selected && selected === text) return { ok: true, verified: true };
+      const latest = await readWorkflow();
+      const control = latest?.controls.find((c) => c.rid === rid);
+      if (!control || signal.aborted) return { ok: false, reason: 'focus' };
+      const focus = await nativeEdit({ kind: 'document', op: 'document-focus', target, control, signal });
+      if (!focus?.ok || signal.aborted) return focus;
+      return paste(target, { text, controlRid: rid, workflowDocument: selected ? 'selection' : 'empty', expectedSelection: selected });
+    },
+    open: async (spec, request, signal, target) => {
+      if (spec.newDocument) return Boolean((await getHands().request('keys.workflowNew', strictKeys(target), 2200).catch(() => null))?.ok);
+      const url = spec.url || (spec.client === 'gmail' ? 'https://mail.google.com/mail/u/0/' : spec.web ? 'https://outlook.live.com/mail/' : '');
+      if (url) {
+        if (guardLine(url)) return false;
+        const named = /\b(?:in|using)\s+(chrome|edge)\b/i.exec(request)?.[1];
+        const preference = named ? browserFor(named) : await defaultBrowser();
+        const browser = preference && ['chrome', 'msedge'].includes(preference.process) ? preference : browserFor('Edge');
+        if (signal.aborted) return false;
+        try { await launchBrowser(browser, url); return true; } catch (_) { return false; }
+      }
+      const exeName = spec.editor === 'word' ? /^(?:microsoft )?word$/i : spec.editor === 'notepad' ? /^notepad$/i : /^(?:microsoft )?outlook(?: \(new\))?$/i;
+      const list = handsAppList();
+      const hit = list.find((a) => exeName.test(a.name)) || (spec.client === 'outlook' ? list.find((a) => /^outlook \(classic\)$/i.test(a.name)) : null);
+      if (signal.aborted || !hit || guardLine(hit.name)) return false;
+      return Boolean((await getReflex().launchInstalled(hit.appId))?.ok);
+    },
+  });
+}
+
 function launchApp(appId) {
   const { spawn } = require('child_process');
   const child = spawn('explorer.exe', ['shell:AppsFolder\\' + appId], { detached: true, stdio: 'ignore', windowsHide: true });
@@ -2453,6 +2574,7 @@ function buildActions() {
   const { execFile } = require('child_process');
   const os = require('os');
   return createActions({
+    inspectWorkflow: readWorkflow,
     probe: { request: (op, p, ms) => probe.request(op, p, ms) },
     hands: { request: (op, p, ms) => { if (!/^mouse[.]/.test(op)) return getHands().request(op, p, ms); overlayMouse.set(true); handsMouseOps++; handsMouseAt = Date.now(); return Promise.resolve(getHands().request(op, p, ms)).finally(() => { handsMouseOps--; handsMouseAt = Date.now(); }); } },
     shell,
@@ -2492,6 +2614,7 @@ function getAgent() {
   pending.ask = (card, action, ctx) => { send('hands:state', { active: true, waiting: true }); return askCard(card, action, ctx).finally(() => send('hands:state', { active: !!(agent && agent.active()), waiting: false })); };
   agent = new HandsAgent({
     read: handsRead,
+    workflow: buildWorkflows(),
     llm: () => guideLlm(),
     actions,
     consent: { preview: handsConsent.preview, pending },
@@ -2869,11 +2992,12 @@ function warmGuideBrain() {
   warmRecallBrain();
 }
 let lastDesktopWarm = null;      // was the last Claude Code answer from a warm spare? (ledger)
-function guideLlm() {
-  const own = companionGuideContext(hedgeLlm(createLLM(store.getSettings())));
+function guideLlm({ workflow = false } = {}) {
+  const withContext = workflow ? (llm) => llm : companionGuideContext;
+  const own = withContext(hedgeLlm(createLLM(store.getSettings())));
   if (typeof hooks.desktopComplete !== 'function') return own;
   if (own.ready && !FORCE_CLAUDE_GUIDE) return own;
-  return companionGuideContext({
+  return withContext({
     ready: true,
     provider: 'claude (desktop)',
     model: GUIDE_FAST_MODEL,
@@ -2886,7 +3010,7 @@ function guideLlm() {
       const prompt = ask;
       // KAASHIFY_GUIDE_DEBUG=1: keep the last prompt and screenshot for replaying a
       // slow step from a shell (timing work, 2026-09-15).
-      if (process.env.KAASHIFY_GUIDE_DEBUG === '1') {
+      if (!workflow && process.env.KAASHIFY_GUIDE_DEBUG === '1') {
         try {
           const dbg = path.join(app.getPath('userData'), 'companion', 'debug');
           fs.mkdirSync(dbg, { recursive: true });
@@ -4837,6 +4961,7 @@ async function routeUtterance(text, source, heard, uttId, assignmentAlreadyCheck
   // "Open Instagram" with the focus guard on: one line, and nothing opens.
   if (refusedByGuard(text, source, heardAt)) return;
   if (agent && agent.active()) { routeUtteranceSlow(text, source, heardAt); return; }
+  if (routeWorkflow(text, source, heardAt)) return;
   // "Turn on Hands", "island mode off", "sound cues on": the Companion's own
   // switches, by voice, no model (live 2026-11-03: "turn on hands" went to the
   // guide, which looked for a Hands control in OBS).
@@ -4878,7 +5003,7 @@ async function routeUtterance(text, source, heard, uttId, assignmentAlreadyCheck
   // Assignment mode first: its words ("homework mode", "walk me through this
   // problem") must not be acted on by the reflex layer or pointed at.
   assignmentHeardAt = heardAt;
-  const localLaunch = !openMicSource(source) && reflex?.enabled() && reflex.exactLaunchApp(text);
+  const localLaunch = !openMicSource(source) && probeReady() && getReflex().enabled() && launchName(text);
   if (!localLaunch && !assignmentAlreadyChecked && await assignmentRoute(text, source || 'voice')) return;
   earlyGuideRead(text, source);
   const r = getReflex();

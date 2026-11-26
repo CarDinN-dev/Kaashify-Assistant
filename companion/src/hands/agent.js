@@ -21,6 +21,7 @@ const { SYSTEM, userTurn } = require('./prompt');
 const { AgentStream } = require('./reply');
 const { settleSignature } = require('../guide/settle');
 const { plainAskError } = require('../ask-error');
+const { FOLLOW_UP, workflowRequest } = require('./workflows');
 
 const MAX_STEPS = 15;
 const EXTRA_STEPS = 10;            // granted a few at a time while clearly progressing
@@ -125,7 +126,7 @@ class HandsAgent {
     if (!this.canResume()) return false;
     const L = this.last;
     this.last = null;
-    return this.run(L.request, source || L.source, Object.assign({}, opts, { goal: L.goal, history: L.history }));
+    return this.run(L.request, source || L.source, Object.assign({}, opts, { goal: L.goal, history: L.history, workflow: L.workflow, workflowTarget: L.workflowTarget }));
   }
 
   // "Enter the recipient as ..." just after a run: more of the same task, with
@@ -135,6 +136,8 @@ class HandsAgent {
     if (!this.canFollowUp()) return false;
     const L = this.last;
     this.last = null;
+    if (L.workflow) return this.run(L.request + FOLLOW_UP + String(words || '').trim(), source || L.source,
+      { ...opts, workflow: L.workflow, workflowTarget: L.workflowTarget });
     return this.run(words, source || L.source, Object.assign({}, opts, { goal: L.goal + '. Now also: ' + String(words || '').trim(), history: L.history }));
   }
 
@@ -148,7 +151,21 @@ class HandsAgent {
     this.task = { request: text, goal: opts.goal || text, source: source || 'typed', askedAt: opts.askedAt || t0, history: Array.isArray(opts.history) ? opts.history.slice() : [], steps: 0, spoke: false, apps: new Set(), openGrace: 0, repeats: new Map(), budget: this.d.maxSteps, rejections: 0, lastSig: null, sameScreen: 0, files: null, outcome: 'ok', note: '' };
     this.setState('running');
     this.d.log('run started');
-    try { await this.loop(gen); }
+    try {
+      const workflow = this.d.workflow && (opts.workflow || workflowRequest(text));
+      if (workflow) {
+        this.task.workflow = workflow;
+        const ctl = new AbortController();
+        this.abort = ctl;
+        try {
+          const done = await this.d.workflow.run(workflow, text, { signal: ctl.signal, previous: opts.workflowTarget });
+          if (gen === this.gen && !ctl.signal.aborted) {
+            this.task.workflowTarget = done.target || opts.workflowTarget;
+            this.finish(done.outcome, done.text);
+          }
+        } finally { if (this.abort === ctl) this.abort = null; }
+      } else await this.loop(gen);
+    }
     catch (e) { if (gen === this.gen) { this.d.log('loop failed: ' + e.message); this.finish('error', 'I could not keep going (' + clip(e.message, 120) + ').'); } }
     return true;
   }
@@ -342,7 +359,7 @@ class HandsAgent {
     this.d.log('finish ' + outcome + ' after ' + T.history.length + ' steps');
     this.gen++;
     this.state = 'idle';
-    this.last = { goal: T.goal, request: T.request, source: T.source, outcome, steps: T.history.length, history: T.history.slice(-HISTORY_CARRY), endedAt: this.d.now() };
+    this.last = { goal: T.goal, request: T.request, source: T.source, outcome, steps: T.history.length, history: T.history.slice(-HISTORY_CARRY), endedAt: this.d.now(), workflow: T.workflow, workflowTarget: T.workflowTarget };
     this.task = null;
     this.d.send('guide:state', { state: 'idle', task: 'hands' });
     try { this.d.onActive(false); } catch (_) { /* a hook never breaks the loop */ }

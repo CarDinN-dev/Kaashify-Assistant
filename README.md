@@ -56,6 +56,29 @@ dictating, enter **Stop typing** in Quick Ask, or press **Esc**. A session
 ends automatically after five minutes. If **Open mic** is enabled, start
 hands-free dictation from Quick Ask.
 
+## Prepare emails, surveys, and documents
+
+Turn on **Hands** in Settings on Windows. Type the request in Quick Ask or
+use the talk key.
+
+- Say **Open 7-Zip File Manager** or give another exact Start menu app name.
+  If multiple installed apps match, select one in Quick Ask.
+- Say **Draft an email in Gmail to pat@example.com saying the notes are ready**.
+  You can use Gmail or Outlook on the web in Chrome or Edge, or Outlook for
+  Windows. Leave the draft open and review the recipient and text before you
+  choose **Send**.
+- Open a survey in Chrome or Edge and say **Fill this survey with rating Good
+  and comment Thank you**. Kaashify uses the answers you give it and leaves
+  the final **Submit** step for you. The configured Screen model receives an
+  image of the target window when capture is available.
+- Say **Write a packing list in Word** or select text in Word or Notepad and
+  say **Rewrite the selected text in Word**. Name and save the document in
+  its editor.
+
+Hands verifies the window, page, and control before it edits. Some app
+versions and custom forms expose incomplete accessibility information. If
+Kaashify pauses, check the open window. **Esc** stops the current task.
+
 ## Build from source on Windows x64
 
 Use Node.js 24 LTS and npm. Install the pinned dependencies and local models,

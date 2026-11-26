@@ -14,10 +14,10 @@
 const fs = require('fs');
 const path = require('path');
 const jev = require('./jev');
-const { createRulesClient, exactLaunchApp } = require('./rules');
+const { createRulesClient, exactLaunchApp, launchName, launchMatches } = require('./rules');
 const PASS_FILLER = /^\s*(?:(?:alright|okay|ok|great|cool|nice|hmm+|uh+|um+|yeah|yes|no|right|so|well|hold on|one sec|wait|it's okay|its okay|never mind|nevermind|thanks|thank you)[\s.,!?]*)+$/i;
 const { route, splitClauses, typePayload, plainDictation, POLICY } = require('./router');
-const { loadCatalog } = require('./catalog');
+const { loadCatalog, MAX_APPS } = require('./catalog');
 const { createExecutor, browserExe } = require('./executor');
 const routines = require('./routines');
 const { createWarm } = require('../guide/assignment-watch');
@@ -29,7 +29,7 @@ const { createWarm } = require('../guide/assignment-watch');
 const GUIDE_OPEN = /^(?:(?:hey|ok|okay|so|um|uh|please|kaashify|kaashify|can you|could you|would you)[\s,]+)*(?:how (?:do|can|would|should) (?:i|you|we)|how to|help me|show me|where is|where's|where are|where do i|where can i|walk me through|point (?:at|to|me to)|guide me|teach me)\b/i;
 function opensLikeGuideAsk(text) { return GUIDE_OPEN.test(String(text || '').trim()); }
 
-function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, onWillFire, onBrain, onVerb, onSpeak, onIntent, jevClient, spawnFn, routinesFile, onOffer, onOfferClosed, offerDelayMs, onUnavailable, onFocusGuard, refuseSite, rules = true }) {
+function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, onWillFire, onBrain, onVerb, onSpeak, onIntent, jevClient, spawnFn, routinesFile, onOffer, onOfferClosed, offerDelayMs, onUnavailable, onFocusGuard, refuseSite, onAppChoices, rules = true }) {
   const say = log || (() => {});
   // With no classifier key the rules (src/reflex/rules.js) answer the same
   // questions, so the engine still runs: conservative, never a guess fired.
@@ -38,6 +38,18 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
   const session = { lastApp: '', lastSite: '', lastAction: '' };
   const cache = new Map();
   let apps = [];
+  let installedApps = [];
+  let catalogScan = null;
+  function refreshApps() {
+    if (!catalogScan) catalogScan = loadCatalog(probe, say, { all: true }).then((results) => {
+      if (results.length || !installedApps.length) {
+        installedApps = results;
+        apps = results.slice(0, MAX_APPS);
+        cache.clear();
+      }
+    }).finally(() => { catalogScan = null; });
+    return catalogScan;
+  }
   // One state per utterance. Live 2026-09-21: the final transcript of sentence 1
   // arrived after sentence 2 had already fired early, found "clause 0 already
   // done" in the shared state, and was silently dropped. Nothing got typed.
@@ -78,7 +90,7 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
 
   async function start() {
     if (!client.ready()) { say('[reflex] off: no TypeSafe key (env TYPESAFE_API_KEY or Settings)'); return false; }
-    apps = await loadCatalog(probe, say);
+    await refreshApps();
     say('[reflex] ready, ' + apps.length + ' apps');
     warm();
     return true;
@@ -102,7 +114,9 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
   async function decideClause(clause, final, keyed) {
     const key = (final ? 'F|' : 'P|') + (keyed ? 'K|' : '') + clause.toLowerCase();
     if (cache.has(key)) return Object.assign({}, cache.get(key), { ms: 0, cached: true });
-    const d = await route(clause, { final, apps, context: session, jev: client, log: say, keyed });
+    const exact = keyed ? exactLaunchApp(clause, installedApps) : null;
+    const choices = exact && !apps.includes(exact) ? [exact, ...apps.slice(0, MAX_APPS - 1)] : apps;
+    const d = await route(clause, { final, apps: choices, context: session, jev: client, log: say, keyed });
     if (cache.size > 200) cache.clear();
     cache.set(key, d);
     return d;
@@ -368,7 +382,17 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
   const CHAIN_KEYS = new Set(['volume_up', 'volume_down', 'mute', 'play_pause', 'snap_left', 'snap_right', 'maximize', 'minimize', 'screenshot']);
   const CHAIN_MIN = 0.7;
   async function step(text, final, heardAt, utt, keyed) {
-    const clauses = await pieces(text, keyed);
+    let exact = false;
+    if (keyed && launchName(text)) {
+      let hits = launchMatches(text, installedApps);
+      if (final && !hits.length && !utt.early.size) { await refreshApps(); hits = launchMatches(text, installedApps); }
+      if (hits.length > 1) {
+        if (final && onAppChoices) onAppChoices(hits);
+        return { handled: true, brainText: null, held: 'choose app' };
+      }
+      exact = hits.length === 1;
+    }
+    const clauses = exact ? [text] : await pieces(text, keyed);
     const brain = [];
     let fired = 0;
     let down = false;
@@ -428,9 +452,13 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
 
   return {
     start, handle, warm, enabled, session,
-    exactLaunchApp: (text) => exactLaunchApp(text, apps),
+    exactLaunchApp: (text) => exactLaunchApp(text, installedApps),
+    launchInstalled: async (appId) => {
+      const app = installedApps.find((entry) => entry.appId === appId);
+      return app ? fire({ intent: 'open_app', app, label: app.name, confidence: 1, final: true, ms: 0 }, Date.now()) : null;
+    },
     clearCarry: () => { carry = { text: '', at: 0 }; },
-    get apps() { return apps; },
+    get apps() { return installedApps; },
   };
 }
 

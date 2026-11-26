@@ -21,7 +21,7 @@ const ALIASES = [
   [/^word$/i, 'word, microsoft word, a document'],
   [/^powerpoint$/i, 'powerpoint, slides'],
   [/^onenote/i, 'onenote, notebook'],
-  [/^outlook/i, 'outlook, email, mail'],
+  [/^(?:microsoft )?outlook/i, 'outlook, email, mail'],
   [/^(windows )?terminal$/i, 'terminal, command line, powershell'],
   [/^discord$/i, 'discord'],
   [/^slack$/i, 'slack'],
@@ -44,7 +44,7 @@ function keyFor(name, used) {
   return k;
 }
 
-function buildCatalog(startApps) {
+function buildCatalog(startApps, { all = false } = {}) {
   const used = new Set();
   const seen = new Set();
   const apps = [];
@@ -52,22 +52,22 @@ function buildCatalog(startApps) {
   // Aliased apps first so the cap never drops the ones people say out loud.
   ranked.sort((a, b) => Number(hasAlias(b.name)) - Number(hasAlias(a.name)));
   for (const a of ranked) {
-    const lower = a.name.toLowerCase();
+    const lower = all ? a.name.toLowerCase() + '\0' + a.appId.toLowerCase() : a.name.toLowerCase();
     if (seen.has(lower)) continue;
     seen.add(lower);
     const alias = ALIASES.find(([re]) => re.test(a.name));
     apps.push({ key: keyFor(a.name, used), name: a.name, appId: a.appId, describe: alias ? a.name + ' (' + alias[1] + ')' : a.name });
-    if (apps.length >= MAX_APPS) break;
+    if (!all && apps.length >= MAX_APPS) break;
   }
   return apps;
 }
 
 function hasAlias(name) { return ALIASES.some(([re]) => re.test(name)); }
 
-async function loadCatalog(probe, log) {
+async function loadCatalog(probe, log, options) {
   try {
     const r = await probe.request('apps.list', {}, 8000);
-    const apps = buildCatalog(r && r.apps);
+    const apps = buildCatalog(r && r.apps, options);
     if (log) log('[reflex] catalog: ' + apps.length + ' apps (' + ((r && r.apps) || []).length + ' in Start)');
     return apps;
   } catch (e) {

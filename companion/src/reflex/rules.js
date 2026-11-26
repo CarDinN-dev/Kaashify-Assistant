@@ -281,18 +281,29 @@ function namesTarget(text, apps = []) {
 // "open notepad", "launch chrome": one verb and an app name, nothing more.
 // The reflex layer does that in well under a second; Hands would take a
 // screenshot first. Everything else that names an app is Hands' job.
-const LAUNCH_ONLY = /^(?:(?:hey|ok|okay|so|um|uh|please|kaashify|can you|could you|would you|lets|let's|now|just|and|then)[\s,]+)*(?:open(?: up)?|launch|start|switch to|bring up|pull up|go to)\s+(?:the\s+|my\s+)?([a-z][a-z0-9 .+'-]{1,40}?)[.!?]*$/i;
+const LAUNCH_ONLY = /^(?:(?:hey|ok|okay|so|um|uh|please|kaashify|can you|could you|would you|lets|let's|now|just|and|then)[\s,]+)*(?:open(?: up)?|launch|start|switch to|bring up|pull up|go to)\s+(?:the\s+|my\s+)?([\p{L}\p{N}][\p{L}\p{M}\p{N} .&+()_#'’!/,\-]{0,119}?)[.!?]*$/iu;
+function launchName(text) {
+  const expression = String(text || '').trim();
+  if (/\b(?:and then|then (?:type|write|search|click|open)|and (?:type|write|search|click|open))\b/i.test(expression)) return '';
+  return LAUNCH_ONLY.exec(expression)?.[1]?.trim() || '';
+}
+
+function launchMatches(text, apps = []) {
+  const name = launchName(text);
+  if (!name) return [];
+  const normalize = (value) => String(value || '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
+  const target = normalize(name);
+  const entries = apps.map((app) => typeof app === 'string' ? { name: app } : app).filter((app) => app?.name);
+  const exact = entries.filter((app) => normalize(app.name) === target);
+  return exact.length ? exact : entries.filter((app) => spokenNames(app).some((alias) => normalize(alias) === target));
+}
+
 function exactLaunchApp(text, apps = []) {
-  const match = LAUNCH_ONLY.exec(String(text || '').trim());
-  if (!match) return null;
-  const normalize = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  const target = normalize(match[1]);
-  const named = apps.filter((app) => normalize(app.name) === target);
-  if (named.length) return named.length === 1 ? named[0] : null;
-  const aliased = apps.filter((app) => spokenNames(app).some((name) => normalize(name) === target));
-  return aliased.length === 1 ? aliased[0] : null;
+  const hits = launchMatches(text, apps);
+  return hits.length === 1 ? hits[0] : null;
 }
 function bareLaunch(text, apps = []) {
+  if (launchMatches(text, apps).length) return true;
   const m = LAUNCH_ONLY.exec(String(text || '').trim());
   if (!m) return false;
   const rest = m[1].toLowerCase().trim();
@@ -427,4 +438,4 @@ function createRulesClient({ apps = () => [], sites = [], now = () => Date.now()
   };
 }
 
-module.exports = { ruleAnswers, createRulesClient, needsScreen, asksAboutSelf, isTask, multistep, carriesText, namesTarget, bareLaunch, exactLaunchApp, handsTakes, launchClause, rewriteAsk, asksDue, readsPage, greeting, messageAsk, fieldFollowUp, trimCutOff, endsMidPhrase, RULES };
+module.exports = { ruleAnswers, createRulesClient, needsScreen, asksAboutSelf, isTask, multistep, carriesText, namesTarget, bareLaunch, launchName, launchMatches, exactLaunchApp, handsTakes, launchClause, rewriteAsk, asksDue, readsPage, greeting, messageAsk, fieldFollowUp, trimCutOff, endsMidPhrase, RULES };

@@ -177,6 +177,15 @@ function Confirm-DictationTarget($req) {
   try {
     $f = $AE::FocusedElement
     if (-not $f -or $f.Current.IsPassword) { return $false }
+    if ($req.controlRid -and (($f.GetRuntimeId() -join ',') -cne [string]$req.controlRid)) { return $false }
+    if ($req.workflowDocument) {
+      $tp = $null
+      if (-not $f.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tp)) { return $false }
+      if ($req.workflowDocument -eq 'selection') {
+        $ranges = @($tp.GetSelection())
+        if ($ranges.Count -ne 1 -or $ranges[0].GetText(10001) -cne [string]$req.expectedSelection) { return $false }
+      } elseif (-not [string]::IsNullOrWhiteSpace($tp.DocumentRange.GetText(10001))) { return $false }
+    }
   } catch { return $false }
   return ([KaashifyHands]::GetForegroundWindow() -eq $h -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -le [int64]$req.deadline)
 }
@@ -252,6 +261,12 @@ function Handle($req) {
       # Bring an app that is ALREADY running to the front. Launching it again from
       # the background only flashes the taskbar (live 2026-09-21), so keys meant
       # for it would have gone to whatever was in front instead.
+      if ($req.exactProcess) {
+        $windows = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -ieq [string]$req.exactProcess })
+        if ($windows.Count -ne 1) { return @{ok=$false; found=$false} }
+        $winHandle = [IntPtr]$windows[0].MainWindowHandle
+        return @{ok=[bool]([KaashifyHands]::Activate($winHandle)); found=$true; hwnd=[int64]$winHandle}
+      }
       $want = ([string]$req.name).ToLowerInvariant() -replace '[^a-z0-9]', ''
       if ($want.Length -lt 3) { return @{ ok=$false; error='name too short' } }
       $hit = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.Id -ne $PID } | Where-Object {
@@ -286,6 +301,16 @@ function Handle($req) {
     'mouse.drag' {
       [KaashifyHands]::Drag([int]$req.x0, [int]$req.y0, [int]$req.x1, [int]$req.y1, 20)
       return @{ ok=$true }
+    }
+    'keys.workflowNew' {
+      $h = [IntPtr][int64]$req.hwnd
+      if ([KaashifyHands]::GetForegroundWindow() -ne $h -or [KaashifyHands]::FgPid() -ne [uint32]$req.targetPid -or
+          [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -gt [int64]$req.deadline) { return @{ok=$false; reason='focus'} }
+      $p = Get-Process -Id $req.targetPid -ErrorAction SilentlyContinue
+      if (-not $p -or $p.ProcessName -notin @('notepad','winword')) { return @{ok=$false; reason='focus'} }
+      if ([KaashifyHands]::GetForegroundWindow() -ne $h) { return @{ok=$false; reason='focus'} }
+      [KaashifyHands]::Chord([int[]]@(0x11, 0x4e))
+      return @{ok=$true}
     }
     'keys.press' {
       # One key or a chord from the wider Hands list (Enter, Escape, arrows,
@@ -352,7 +377,7 @@ function Handle($req) {
           do {
             $v = Read-FocusedText
             if ($null -eq $v) { break }
-            if ((Squash $v).Contains($needle)) { $verified = $true; break }
+            if ((Squash $v).Contains($needle) -and (-not $req.workflowDocument -or $v -cne $before)) { $verified = $true; break }
             $verified = $false
             Start-Sleep -Milliseconds 70
           } while ([DateTime]::Now -lt $deadline)

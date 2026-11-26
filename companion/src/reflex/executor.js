@@ -33,6 +33,12 @@ function volumePresses(clause) {
   return 3;
 }
 
+const PROCESS_BY_APP = new Map([
+  ['notepad', 'notepad'], ['word', 'winword'], ['microsoft word', 'winword'],
+  ['google chrome', 'chrome'], ['microsoft edge', 'msedge'], ['mozilla firefox', 'firefox'],
+  ['visual studio code', 'code'], ['outlook (classic)', 'outlook'], ['outlook (new)', 'olk'],
+]);
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 'open chrome and search X' must search in Chrome, not in whatever the Windows
@@ -144,9 +150,25 @@ function createExecutor({ probe, hands, shell, log, vaultDir, notesFile, spawnFn
       if (line) return { ok: false, refused: 'focus guard', line };
     }
     switch (d.intent) {
-      case 'open_app':
+      case 'open_app': {
+        const processName = PROCESS_BY_APP.get(d.app.name.toLowerCase());
+        if (processName && String(before?.process || '').toLowerCase() === processName && !before.behindSelf) {
+          return { ok: true, settle: async () => before, target: d.app.name };
+        }
+        if (hands && processName) {
+          try {
+            const activated = await hands.request('win.activate', { exactProcess: processName }, 1200);
+            if (activated?.ok && activated.hwnd) {
+              const active = await fg();
+              if (active?.hwnd === activated.hwnd && String(active.process || '').toLowerCase() === processName && !active.behindSelf) {
+                return { ok: true, settle: async () => active, target: d.app.name };
+              }
+            }
+          } catch (_) { /* Launch normally when the existing window cannot be verified. */ }
+        }
         launch(d.app.appId);
         return { ok: true, settle: () => settle(beforeHwnd, 3500, d.app.name), target: d.app.name };
+      }
       case 'open_site':
         await openUrl(d.url, d.browserApp);
         return { ok: true, settle: () => settle(beforeHwnd, 2500, d.browserApp), target: d.url };

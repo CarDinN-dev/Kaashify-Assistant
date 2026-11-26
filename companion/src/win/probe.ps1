@@ -232,11 +232,12 @@ function Get-Foreground($ignore) {
 
 # Depth-first walk of the control view under a window, bounded by count, depth
 # and time. Returns interactive, on-screen elements in document order.
-function Walk-Controls($hwnd, $max, $budgetMs) {
+function Walk-Controls($hwnd, $max, $budgetMs, $workflow = $false) {
   $root = $AE::FromHandle([IntPtr][int64]$hwnd)
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $out = New-Object System.Collections.ArrayList
   $containers = New-Object System.Collections.ArrayList
+  $refs = @{}
   $stack = New-Object System.Collections.Stack
   $truncated = $false
   $first = $null
@@ -255,10 +256,16 @@ function Walk-Controls($hwnd, $max, $budgetMs) {
     $type = Type-Name $el $true
     if (-not $off -and $Interactive.ContainsKey($type) -and $Interactive[$type] -eq 1) {
       $d = Describe $el $true ($out.Count + 1)
-      if ($d.rect) { [void]$out.Add($d) }
+      if ($d.rect) {
+        [void]$out.Add($d)
+        if ($workflow) { $refs[$d.id] = $el }
+      }
     } elseif (-not $off -and $depth -gt 1 -and $containers.Count -lt $ContainerMax -and $Containers.ContainsKey($type)) {
       $c = Describe $el $true (1000 + $containers.Count + 1)
-      if ($c.rect -and $c.rect.w -gt 40 -and $c.rect.h -gt 24) { [void]$containers.Add($c) }
+      if ($c.rect -and $c.rect.w -gt 40 -and $c.rect.h -gt 24) {
+        [void]$containers.Add($c)
+        if ($workflow) { $refs[$c.id] = $el }
+      }
     }
     if ($depth -lt 18 -and -not $off) {
       $child = $null
@@ -266,7 +273,9 @@ function Walk-Controls($hwnd, $max, $budgetMs) {
       if ($child) { $stack.Push(@($child, $depth + 1)) }
     }
   }
-  return @{ elements=@($out.ToArray()); containers=@($containers.ToArray()); truncated=$truncated; visited=$seen; ms=[int]$sw.ElapsedMilliseconds }
+  $result = @{ elements=@($out.ToArray()); containers=@($containers.ToArray()); truncated=$truncated; visited=$seen; ms=[int]$sw.ElapsedMilliseconds }
+  if ($workflow) { $result.refs = $refs }
+  return $result
 }
 
 function Score-Name($candidate, $want) {
@@ -427,9 +436,239 @@ function Get-WindowText($hwnd, [int]$max, [int]$budgetMs, $ignore) {
   return @{ text=$text; from=$(if ($docs.Length -gt 0) { 'document' } else { 'labels' }); sources=$sources; passwordsSkipped=$skipped; truncated=$truncated; ms=[int]$sw.ElapsedMilliseconds; hwnd=[int64]$hwnd; title=[KaashifyWin]::Title([IntPtr][int64]$hwnd) }
 }
 
+# The workflow side never accepts a screen coordinate or arbitrary shortcut.
+# Runtime IDs bind every mutation to a live accessibility control.
+function Workflow-Id($el) {
+  try { return ($el.GetRuntimeId() -join ',') } catch { return '' }
+}
+
+function Workflow-Pattern($el, $pattern) {
+  try {
+    $value = $null
+    if ($el.TryGetCurrentPattern($pattern, [ref]$value)) { return $value }
+  } catch {}
+  return $null
+}
+
+function Workflow-Private($name) {
+  return [string]$name -match '\b(password|passcode|captcha|pin|otp|cvv|cvc|passport|security (code|question)|card number|bank account|identity number|tax id|social security|one.time code)\b'
+}
+
+function Workflow-Attributes($el, $control, $browser) {
+  $control.rid = Workflow-Id $el
+  $control.enabled = $false
+  $control.web = $false
+  $control.group = ''
+  $control.required = $false
+  $control.selected = $false
+  $control.filled = $false
+  try {
+    $control.enabled = [bool]$el.Current.IsEnabled
+    $control.required = [bool]$el.Current.IsRequiredForForm
+  } catch {}
+  try {
+    $label = $el.Current.LabeledBy
+    if ($label -and $label.Current.Name) { $control.group = [string]$label.Current.Name }
+  } catch {}
+  $raw = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  $parent = $el
+  for ($n = 0; $n -lt 18; $n++) {
+    try { $parent = $raw.GetParent($parent) } catch { break }
+    if (-not $parent) { break }
+    $kind = Type-Name $parent $false
+    if ($kind -eq 'Document') { $control.web = $browser; break }
+    if ($kind -eq 'Window') { break }
+    if (-not $control.group -and $kind -in @('Group','List','ComboBox')) {
+      try {
+        $control.group = [string]$parent.Current.Name
+        if ($parent.Current.IsRequiredForForm) { $control.required = $true }
+      } catch {}
+    }
+  }
+  try {
+    $selection = Workflow-Pattern $el ([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    if ($selection) { $control.selected = [bool]$selection.Current.IsSelected }
+    $toggle = Workflow-Pattern $el ([System.Windows.Automation.TogglePattern]::Pattern)
+    if ($toggle) { $control.selected = [string]$toggle.Current.ToggleState -eq 'On' }
+    if ($control.type -eq 'Edit' -and -not $control.isPassword -and -not (Workflow-Private ($control.name + ' ' + $control.group))) {
+      $vp = Workflow-Pattern $el ([System.Windows.Automation.ValuePattern]::Pattern)
+      if ($vp) { $control.filled = -not [string]::IsNullOrWhiteSpace([string]$vp.Current.Value) }
+    }
+  } catch {}
+}
+
+function Workflow-Snapshot {
+  $front = Get-Foreground 0
+  $out = @{ fg=$front; controls=@(); url=''; tab=''; view=''; recipients=''; selection=''; editor=''; emptyDocument=$false; live=@{} }
+  if (-not $front.hwnd -or $front.process -notin @('chrome','msedge','outlook','olk','notepad','winword')) { return $out }
+  $browser = $front.process -in @('chrome','msedge')
+  $walk = Walk-Controls $front.hwnd 180 1500 $true
+  $controls = @($walk.elements) + @($walk.containers | Where-Object { $_.type -eq 'Document' })
+  foreach ($c in $controls) {
+    $el = $walk.refs[$c.id]
+    Workflow-Attributes $el $c $browser
+    if (-not $c.rid) { continue }
+    $out.live[$c.rid] = $el
+    if ($c.type -eq 'TabItem' -and $c.selected -and -not $c.web -and -not $out.tab) { $out.tab = $c.rid }
+    if ($browser -and -not $c.web) {
+      if ($c.type -eq 'Edit' -and ($c.automationId -eq 'addressEditBox' -or $c.name -match '^Address and search bar$')) {
+        $vp = Workflow-Pattern $el ([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($vp) {
+          $address = ([string]$vp.Current.Value).Trim()
+          if ($address -match '^https?://') { $out.url = $address }
+          elseif ($address -match '^[a-z0-9.-]+\.[a-z]{2,}(?::[0-9]+)?(?:[/#?]|$)') { $out.url = 'https://' + $address }
+        }
+      }
+      if ($c.type -eq 'Document' -and -not $out.view) { $out.view = $c.rid }
+    }
+    if (($browser -and $c.web -or $front.process -in @('outlook','olk')) -and $c.type -in @('Button','ListItem','Group') -and
+        ($c.group -match '^(to|recipients?|to recipients?):?$' -or $c.name -match '^remove recipient')) {
+      $out.recipients += ' ' + $c.name
+    }
+  }
+  if ($front.process -in @('notepad','winword')) {
+    $docs = @($controls | Where-Object {
+      $_.rid -and -not $_.isPassword -and
+      ($_.type -eq 'Document' -or ($_.type -eq 'Edit' -and ($_.name -match '^(Text editor|Document|Editing area)$' -or $_.automationId -eq '15')))
+    })
+    try {
+      $focusId = Workflow-Id ($AE::FocusedElement)
+      $docs = @($docs | Sort-Object { if ($_.rid -eq $focusId) { 0 } elseif ($_.type -eq 'Document') { 1 } else { 2 } })
+    } catch {}
+    foreach ($c in $docs) {
+      $doc = $out.live[$c.rid]
+      $pattern = Workflow-Pattern $doc ([System.Windows.Automation.TextPattern]::Pattern)
+      if (-not $pattern) { continue }
+      try {
+        $out.view = $c.rid + '|' + $front.title
+        $out.editor = $c.rid
+        $out.emptyDocument = [string]::IsNullOrWhiteSpace($pattern.DocumentRange.GetText(10001))
+        $selected = @($pattern.GetSelection())
+        if ($selected.Count -eq 1) {
+          $text = $selected[0].GetText(10001)
+          if ($text.Length -le 10000) { $out.selection = $text }
+        }
+        break
+      } catch {}
+    }
+  }
+  $out.controls = @($controls | Where-Object { $_.rid })
+  if ([KaashifyWin]::GetForegroundWindow().ToInt64() -ne $front.hwnd) {
+    return @{ fg=$null; controls=@(); live=@{}; url=''; view=''; tab='' }
+  }
+  return $out
+}
+
+function Workflow-TargetMatches($snap, $want) {
+  if (-not $snap.fg -or -not $want.hwnd -or -not $want.pid) { return $false }
+  return ($snap.fg.hwnd -eq $want.hwnd -and $snap.fg.pid -eq $want.pid -and
+          [string]$snap.tab -ceq [string]$want.tab -and [string]$snap.view -ceq [string]$want.view -and
+          [string]$snap.url -ceq [string]$want.url -and
+          [KaashifyWin]::GetForegroundWindow().ToInt64() -eq $want.hwnd)
+}
+
+function Workflow-Edit($req) {
+  $s = Workflow-Snapshot
+  $deadline = [int64]$req.deadline
+  if (-not (Workflow-TargetMatches $s $req.target) -or [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -gt $deadline) { return @{ok=$false; reason='focus'} }
+  $mode = [string]$req.kind
+  $op = [string]$req.action
+  $browser = $s.fg.process -in @('chrome','msedge')
+  if ($op -eq 'scroll' -and $mode -eq 'survey' -and $browser) {
+    foreach ($c in @($s.controls | Where-Object { $_.type -eq 'Document' })) {
+      $scroll = Workflow-Pattern $s.live[$c.rid] ([System.Windows.Automation.ScrollPattern]::Pattern)
+      if ($scroll -and $scroll.Current.VerticallyScrollable -and $scroll.Current.VerticalScrollPercent -lt 100) {
+        $scroll.Scroll([System.Windows.Automation.ScrollAmount]::NoAmount, [System.Windows.Automation.ScrollAmount]::LargeIncrement)
+        return @{ok=$true}
+      }
+    }
+    return @{ok=$false; reason='no-scroll'}
+  }
+  $rid = [string]$req.control.rid
+  $control = @($s.controls | Where-Object { $_.rid -ceq $rid -and $_.name -ceq $req.control.name -and $_.type -ceq $req.control.type -and [string]$_.group -ceq [string]$req.control.group })
+  if ($control.Count -ne 1) { return @{ok=$false; reason='control'} }
+  $c = $control[0]
+  $el = $s.live[$rid]
+  if (-not $c.enabled -or $c.isPassword -or (Workflow-Private ($c.name + ' ' + $c.group))) { return @{ok=$false; reason='control'} }
+  $isMail = $browser -or $s.fg.process -in @('outlook','olk')
+  if ($browser -and -not $c.web) { return @{ok=$false; reason='control'} }
+  if ($op -eq 'document-focus' -and $mode -eq 'document' -and $c.rid -eq $s.editor -and $s.fg.process -in @('notepad','winword')) {
+    $el.SetFocus()
+    return @{ok=((Workflow-Id ($AE::FocusedElement)) -ceq $rid); reason='focus'}
+  }
+  if ($op -eq 'next' -or $op -eq 'compose') {
+    $safe = ($op -eq 'next' -and $mode -eq 'survey' -and $browser -and $c.name -match '^(Next|Next page|Continue to next (page|section))$') -or
+            ($op -eq 'compose' -and $mode -eq 'email' -and $isMail -and $c.name -match '^(Compose|New mail|New message|New e-mail|New email)$')
+    $invoker = Workflow-Pattern $el ([System.Windows.Automation.InvokePattern]::Pattern)
+    if (-not $safe -or $c.type -ne 'Button' -or -not $invoker) { return @{ok=$false; reason='control'} }
+    $invoker.Invoke()
+    return @{ok=$true}
+  }
+  $value = [string]$req.value
+  if ($op -eq 'commit-recipient' -and $mode -eq 'email' -and $isMail -and $c.type -in @('ListItem','MenuItem','Button')) {
+    if ($c.name -match '^(send|submit|compose|message|email to)\b') { return @{ok=$false; reason='control'} }
+    if ($value -notmatch '^[^\s@]+@[^\s@]+\.[a-z]{2,}$' -or
+        $c.name -notmatch ('(?:^|[<(,\s])' + [regex]::Escape($value) + '(?:$|[>),\s])')) { return @{ok=$false; reason='control'} }
+    if ($c.type -eq 'Button' -and $c.name -notmatch '^(Add recipient|Add address)\b') { return @{ok=$false; reason='control'} }
+    $invoker = Workflow-Pattern $el ([System.Windows.Automation.InvokePattern]::Pattern)
+    if (-not $invoker) { return @{ok=$false; reason='control'} }
+    $invoker.Invoke()
+    return @{ok=$true}
+  }
+  if ($value.Length -eq 0 -or $value.Length -gt 10000) { return @{ok=$false; reason='value'} }
+  if ($op -eq 'email-field' -and $mode -eq 'email' -and $isMail) {
+    $label = [string]$c.name
+    $ok = ($req.field -eq 'to' -and $c.type -eq 'Edit' -and $label -match '^(To:?|To recipients?|Recipients?|Add recipients?|Enter recipients?)$') -or
+          ($req.field -eq 'subject' -and $c.type -eq 'Edit' -and $label -match '^(Add a subject|Subject:?)$') -or
+          ($req.field -eq 'body' -and $c.type -in @('Edit','Document') -and $label -match '^(Message body|Email body|Body|Message|Compose email|Message content)$')
+    if (-not $ok) { return @{ok=$false; reason='control'} }
+  } elseif ($mode -ne 'survey' -or -not $browser) { return @{ok=$false; reason='control'} }
+  if (($op -eq 'field' -and $c.type -eq 'Edit') -or $op -eq 'email-field') {
+    $vp = Workflow-Pattern $el ([System.Windows.Automation.ValuePattern]::Pattern)
+    if (-not $vp -or $vp.Current.IsReadOnly) {
+      if ($op -ne 'email-field' -or $req.field -ne 'body') { return @{ok=$false; reason='control'} }
+      $el.SetFocus()
+      if ((Workflow-Id ($AE::FocusedElement)) -ceq $rid) { return @{ok=$false; reason='paste-needed'; rid=$rid} }
+      return @{ok=$false; reason='control'}
+    }
+    $before = [string]$vp.Current.Value
+    if ($before -ceq $value) { return @{ok=$true} }
+    if (($op -eq 'field' -or $req.field -eq 'to') -and -not [string]::IsNullOrWhiteSpace($before)) { return @{ok=$false; reason='filled'} }
+    $vp.SetValue($value)
+    return @{ok=([string]$vp.Current.Value -ceq $value); reason='unverified'}
+  }
+  if ($op -eq 'choose' -and $value.Trim() -match '^(send|submit|finish|complete|turn in|hand in)( (this |the )?(e-?mail|message|survey|form|responses?))?$') {
+    return @{ok=$false; reason='control'}
+  }
+  if ($op -eq 'choose' -and $c.type -in @('RadioButton','CheckBox','ListItem','ComboBox')) {
+    if ($c.type -eq 'ComboBox') {
+      $expand = Workflow-Pattern $el ([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+      if ($expand -and [string]$expand.Current.ExpandCollapseState -eq 'Collapsed') { $expand.Expand() }
+      $listItem = New-Object System.Windows.Automation.PropertyCondition ($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
+      $opts = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, $listItem)
+      $matching = @($opts | Where-Object { $_.Current.Name -ieq $value -and $_.Current.IsEnabled })
+      if ($matching.Count -ne 1) { return @{ok=$false; reason='control'} }
+      $el = $matching[0]
+    } elseif ($c.name -ine $value) { return @{ok=$false; reason='value'} }
+    $item = Workflow-Pattern $el ([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    if ($item) {
+      if (-not $item.Current.IsSelected) { $item.Select() }
+      return @{ok=[bool]$item.Current.IsSelected; reason='unverified'}
+    }
+    $toggle = Workflow-Pattern $el ([System.Windows.Automation.TogglePattern]::Pattern)
+    if ($toggle -and $c.type -eq 'CheckBox') {
+      if ([string]$toggle.Current.ToggleState -eq 'Off') { $toggle.Toggle() }
+      return @{ok=([string]$toggle.Current.ToggleState -eq 'On'); reason='unverified'}
+    }
+  }
+  return @{ok=$false; reason='control'}
+}
+
 function Handle($req) {
   $op = [string]$req.op
   switch ($op) {
+    'workflow.read' { $w = Workflow-Snapshot; $w.Remove('live'); return $w }
+    'workflow.edit' { return Workflow-Edit $req }
     'ping' { return @{ ok=$true; pid=$PID; ps=$PSVersionTable.PSVersion.ToString() } }
     'ocr' {
       try { return Read-Words ([string]$req.path) ([bool]$req.words) }

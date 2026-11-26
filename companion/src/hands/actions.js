@@ -10,6 +10,7 @@
 // thread, file search, app launch) so the registry runs in tests with fakes.
 const path = require('path');
 const { chooseElement, overlap } = require('../guide/chooser');
+const { protectedKind } = require('./workflows');
 const { sensitiveTarget } = require('../guide/sensitive');
 
 const VK = { enter: 0x0D, return: 0x0D, escape: 0x1B, esc: 0x1B, tab: 0x09, backspace: 0x08, delete: 0x2E, del: 0x2E, space: 0x20, home: 0x24, end: 0x23, pageup: 0x21, pagedown: 0x22, up: 0x26, down: 0x28, left: 0x25, right: 0x27, ctrl: 0x11, control: 0x11, shift: 0x10, alt: 0x12, win: 0x5B, insert: 0x2D };
@@ -111,7 +112,7 @@ function frontIs(fg, app) {
 
 const APP_FRONT_MS = 8000;       // a cold start of Word, Excel or a browser
 
-function createActions({ probe, hands, shell, pointAt, settleThread, launchApp, launchBrowser, defaultBrowser, apps, searchFiles, openPath, refuseSite, log = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), selfPid = -1 }) {
+function createActions({ inspectWorkflow, probe, hands, shell, pointAt, settleThread, launchApp, launchBrowser, defaultBrowser, apps, searchFiles, openPath, refuseSite, log = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), selfPid = -1 }) {
   const say = log;
   // Keys only ever go to the app the task opened (ctx.target). Live 2026-10-12:
   // a browser stayed behind a full-screen window, the next look landed on the
@@ -357,7 +358,21 @@ function createActions({ probe, hands, shell, pointAt, settleThread, launchApp, 
   async function run(name, args, ctx) {
     const fn = actions[name];
     if (!fn) return { ok: false, report: 'no such action "' + clip(name, 30) + '"' };
-    try { return await fn(args || {}, ctx || {}); }
+    try {
+      if (inspectWorkflow && ['click', 'press', 'type', 'drag'].includes(name)) {
+        const front = await inspectWorkflow();
+        const surface = protectedKind(front) || protectedKind(ctx);
+        if (surface === 'email' || surface === 'survey') {
+          return { ok: false, guarded: true, report: surface === 'email'
+            ? 'Use “draft an email” to prepare it, then review and send it yourself.'
+            : 'Use “fill this survey” to prepare it, then review and submit it yourself.' };
+        }
+        if (ctx?.fg?.hwnd && front?.fg?.hwnd && front.fg.pid !== selfPid && front.fg.hwnd !== ctx.fg.hwnd) {
+          return { ok: false, guarded: true, report: 'The foreground window changed. Try again from the target window.' };
+        }
+      }
+      return await fn(args || {}, ctx || {});
+    }
     catch (e) { say('[hands] ' + name + ' failed: ' + e.message); return { ok: false, report: name + ' failed: ' + clip(e.message, 100) }; }
   }
 
