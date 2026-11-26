@@ -39,11 +39,13 @@ const forbiddenPaths = entries.filter((entry) =>
 
 // The standalone archive must never contain src/config.js.
 const required = companionProfile ? ['src/main-companion.js', 'src/profile-file.js', 'companion/index.js', 'companion/renderer/index.html', 'companion/home/index.html', 'companion/src/reflex/jev.js',
+  'companion/src/chrome/actions.js', 'companion/src/chrome/bridge.js', 'companion/src/chrome/store-listing.json',
   'companion/ui/typography.css', 'companion/ui/Geist-Variable.woff2', 'companion/ui/Geist-OFL.txt'] : ['src/license.js', 'src/limits.js', 'src/main.js', 'renderer/index.html'];
 const missingPaths = required.filter((entry) => !entries.includes(entry));
 if (companionProfile) {
   // whisper-server keeps the speech model loaded between asks (npm run setup:voice fetches it).
   for (const resource of ['whisper-models/ggml-base.en-q5_1.bin', 'whisper/whisper-cli.exe', 'whisper/whisper-server.exe', 'win/hands.ps1', 'win/probe.ps1',
+    'chrome/KaashifyChromeHost.exe', 'chrome/LICENSE-Go',
     'embed-models/all-MiniLM-L6-v2/model_quantized.onnx', 'embed-models/all-MiniLM-L6-v2/vocab.txt',
     'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node',
     'app.asar.unpacked/node_modules/sherpa-onnx-win-x64/sherpa-onnx.node',
@@ -71,8 +73,7 @@ const brandingFindings = [];
 const legacyBrand = /(?:^|[^a-z])(?:n[ūu]s(?![a-z])|potlakai\.github\.io|publikhq\.com|xnpkplcjurzwanotmwwt\.supabase\.co)/iu;
 
 for (const entry of ownedText) {
-  let source;
-  try { source = asar.extractFile(archive, entry).toString('utf8'); } catch { continue; }
+  const source = asar.extractFile(archive, path.normalize(entry)).toString('utf8');
   if (companionProfile && legacyBrand.test(source)) brandingFindings.push(entry);
   for (const [kind, pattern] of patterns) {
     pattern.lastIndex = 0;

@@ -92,3 +92,32 @@ Hold the candidate for the approved Chrome Web Store listing and native Windows 
 1. Submit the extension using the Chrome Web Store publisher account and complete review. Add the approved extension ID and rebuild the Windows candidate.
 2. Run the native Windows clean-install, upgrade and uninstall checks. Verify the approved Store installation and pairing flow, task resumption, cancellation, native Chrome and app focus changes, and Chrome-to-Notepad-to-Outlook using test accounts and data.
 3. Inspect the native approval cards, keyboard behavior, and protected final actions. Resolve and retest any findings before pushing the audited revision and uploading the verified installer and checksum.
+
+## Windows handoff follow-up
+
+26 November 2026 · Windows x64 · Handoff tip `800e479728e3868fb05dfc8bb658b6d02edd7d37` · Required base `7c04b20d8e9a051cf8392d931e2ccee73376809a`
+
+### Fixes verified on Windows
+
+| Finding | Fix and verification |
+| --- | --- |
+| The compiled Chrome helper stalled before pairing because a synchronous named-pipe read could block its write on the same handle. | Open the pipe for overlapped I/O. The compiled helper sent the foreground-profile message and relayed a request and response over a native Windows named pipe. A separate check also verified that it rejected a mismatched extension origin. |
+| The package scanner counted Windows ASAR entries it could not extract. | Normalize archive paths for extraction and fail if an owned file cannot be read. Require the Chrome bridge, Go helper, and Go license in the standalone package. A synthetic archive with a prohibited marker was rejected. |
+| Windows Git converted LF sources to CRLF, causing 25 failures in source-pattern tests. A Windows-only Publik test also used a stale environment flag and credential filename. | Preserve the repository's LF text in Git and use the configured flag and slug in the test fixture. Publik remains disabled in the standalone release profile. |
+| Chrome setup did not state which page data could go to the user's AI provider. | Disclose visible page text and control labels beside Settings setup and in the first-task approval card. The Windows renderer and matching-approval regression cover the disclosure. |
+
+The Windows package version is `0.1.44`, ahead of the existing `0.1.43` installer and aligned with the extension. The extension source is unchanged. The six files in the handoff ZIP, including both notices, matched the checked-out bytes. ZIP SHA-256 is `eac5d9fb18a1a99fde59d34e52da9ecd859d00dbbeb8a5282c13c02b598785da`.
+
+### Local verification results
+
+- Windows build used Node.js `24.17.0`, npm `11.13.0`, Go `1.27.4` and Electron `43.8.13`. The documented Windows x64 NSIS build completed. The installer was unsigned and its SHA-256 is `d4aa8f3b34250093ebef898e8a82cd3645651d271a1f2dad13a610201a228271`.
+- The full Node suite on Windows passed 1,477 tests with zero failures and 35 skips, using four test workers to avoid contention with compression. The focused Chrome suite passed all 11 tests, including the actual Go helper. Full and runtime npm audits returned zero advisories. PowerShell parsed the Windows input helpers.
+- The package scan read 172 owned text files with zero missing paths, forbidden paths, credential findings or retired branding. Both the NSIS installer and its embedded x64 archive passed integrity checks. The embedded executable, ASAR, Chrome helper, Hands script and notices matched the unpacked build. The extracted Chrome helper repeated the native pipe and mismatched-origin checks successfully.
+- The unpacked app started its dashboard, overlay and capture worker on Windows with a fresh test profile and exited cleanly on repeat. An earlier run alongside compression reached startup and timed out waiting for exit. The final rebuild contained byte-identical app executable and ASAR files. The Store connection remained disabled because the production Store ID was empty.
+
+### Release gates
+
+- **Chrome Web Store** · Google accepted the verified ZIP into draft `pkjmdpdlaikopcjeilfneaclmdlmhmck`. The listing copy, icon, screenshot, promo tile, permission justifications, Website content and Web history selections, and reviewer steps were saved. Google requires a verified public publisher contact email, the three Limited Use certifications, and a public extension privacy policy URL. Publisher approval is pending. Review has not started. The checked-in Store ID remains empty until approval.
+- **Isolated Windows lifecycle** · Clean install, upgrade from `0.1.43`, uninstall, and Start with Windows remain pending in a dedicated Windows 10/11 account or VM. The available process could not create a local account. The existing daily installation and Chrome profile were kept out of install testing.
+- **Store-enabled native workflow** · After approval, rebuild with the Store ID. Verify user-confirmed Store installation, pairing, automatic task resumption, search, typing, form filling, task-scoped tab changes, and Esc cancellation. Verify target changes stop input and exercise the spoken Chrome-to-Notepad-to-Outlook task using test accounts. The user performs final **Send** and **Submit** actions.
+- **GitHub release** · GitHub reported `PUBLIC` for `CarDinN-dev/Kaashify-Assistant`. Push only to a verified private destination after both release gates pass. The branch, build artifacts and checks remain local.

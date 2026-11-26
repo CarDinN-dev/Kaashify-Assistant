@@ -1,6 +1,6 @@
 {
   "name": "kaashify",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "description": "Kaashify is a voice and text assistant for your Windows desktop.",
   "main": "src/main-companion.js",
   "private": true,

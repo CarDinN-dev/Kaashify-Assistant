@@ -2,6 +2,9 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawn } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
+const { existsSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const net = require('node:net');
 const os = require('node:os');
@@ -25,7 +28,7 @@ test('Chrome frames handle fragmentation and reject unbounded input', () => {
   assert.throws(() => receive(Buffer.from([0, 0, 255, 0])), /Invalid Chrome message/);
 });
 
-test('local host authenticates, pairs one foreground profile, and drops requests at disconnect', { skip: process.platform === 'win32' }, async t => {
+test('local host authenticates, pairs one foreground profile, and drops requests at disconnect', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ks-chrome-'));
   const executable = path.join(dir, 'host.exe');
   await fs.writeFile(executable, '');
@@ -36,7 +39,7 @@ test('local host authenticates, pairs one foreground profile, and drops requests
     extensionId: 'a'.repeat(32), profileDir: dir, executable,
     getProfile: () => saved, saveProfile: id => { saved = id; },
     register: async file => { registration = JSON.parse(await fs.readFile(file)); },
-    pipeAddress: () => path.join(dir, 'pipe'),
+    pipeAddress: process.platform === 'win32' ? undefined : () => path.join(dir, 'pipe'),
   });
   t.after(async () => {
     for (const socket of connections) socket.destroy();
@@ -76,6 +79,44 @@ test('local host authenticates, pairs one foreground profile, and drops requests
   await bridge.disconnect();
   assert.equal((await cancelled).ok, false);
   await assert.rejects(fs.stat(path.join(dir, 'chrome-bridge.json')), { code: 'ENOENT' });
+});
+
+const nativeHost = path.resolve(__dirname, '../../build/chrome/KaashifyChromeHost.exe');
+test('the built Windows host relays requests and responses over a native pipe', {
+  skip: process.platform !== 'win32' || !existsSync(nativeHost), timeout: 10000,
+}, async t => {
+  const appData = await fs.mkdtemp(path.join(os.tmpdir(), 'ks-native-host-'));
+  const extensionId = 'a'.repeat(32);
+  const expected = randomUUID();
+  let paired = '';
+  let child;
+  const bridge = createChromeBridge({
+    extensionId, profileDir: path.join(appData, 'Kaashify'), executable: nativeHost,
+    getProfile: () => paired, saveProfile: id => { paired = id; }, register: async () => {},
+  });
+  t.after(async () => {
+    await bridge.disconnect();
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const closed = once(child, 'close');
+      child.kill();
+      await closed;
+    }
+    await fs.rm(appData, { recursive: true, force: true });
+  });
+  assert.ok(await bridge.enable({ pair: true }));
+  child = spawn(nativeHost, [`chrome-extension://${extensionId}/`], {
+    windowsHide: true, env: { ...process.env, APPDATA: appData },
+  });
+  await once(child, 'spawn');
+  child.stdin.on('error', () => {});
+  child.stdout.on('data', decode(message => {
+    child.stdin.write(frame({ id: message.id, result: { ok: message.kind === 'observe' } }));
+  }));
+  child.stdin.write(frame({ kind: 'profile', profile: expected, focused: true }));
+  for (let i = 0; i < 80 && !bridge.status().connected; i++) await sleep(25);
+  assert.equal(paired, expected);
+  assert.equal(bridge.status().connected, true);
+  assert.deepEqual(await bridge.send({ kind: 'observe' }), { ok: true });
 });
 
 test('browser actions stay bound to the observed tab, exact control, and foreground window', async () => {
@@ -147,6 +188,7 @@ test('Chrome setup runs only after the matching on-screen approval and resumes t
   const work = agent.run('Search Chrome for cats.', 'typed');
   await Promise.resolve();
   const card = events.find(([name]) => name === 'guide:bubble')[1];
+  assert.match(card.hint, /visible page text and control labels to your configured AI provider/);
   assert.equal(agent.answerFromBubble(true, 'another-task'), false);
   assert.equal(agent.spoken('yes', {}), 'needs-button');
   assert.equal(agent.answerFromBubble(true, card.sessionId), true);

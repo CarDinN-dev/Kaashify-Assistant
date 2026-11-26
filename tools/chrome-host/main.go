@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"syscall"
 )
 
 const maxFrame = 128 * 1024
@@ -62,10 +63,17 @@ func main() {
 	if err != nil || config.Origin != os.Args[1] || !pipePattern.MatchString(config.Pipe) || !tokenPattern.MatchString(config.Token) {
 		return
 	}
-	pipe, err := os.OpenFile(config.Pipe, os.O_RDWR, 0)
+	pipeName, err := syscall.UTF16PtrFromString(config.Pipe)
 	if err != nil {
 		return
 	}
+	// A synchronous pipe can block writes while the read relay waits for input.
+	handle, err := syscall.CreateFile(pipeName, syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		0, nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_OVERLAPPED, 0)
+	if err != nil {
+		return
+	}
+	pipe := os.NewFile(uintptr(handle), config.Pipe)
 	defer pipe.Close()
 	token, _ := json.Marshal(map[string]string{"token": config.Token})
 	if err := binary.Write(pipe, binary.LittleEndian, uint32(len(token))); err != nil {

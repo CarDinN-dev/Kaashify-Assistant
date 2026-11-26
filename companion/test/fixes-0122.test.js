@@ -57,23 +57,23 @@ test('the switch button is wired: answer bubble, guide, the no-AI bubbles, and i
 
 test('the switch is only offered to someone signed in with publik who answers another way', () => {
   const pub = require('../src/publik');
-  const saved = { on: process.env.KAASHIFY_PUBLIK, local: process.env.LOCALAPPDATA, key: process.env.PUBLIK_API_KEY };
+  const saved = { on: process.env.NUS_PUBLIK, local: process.env.LOCALAPPDATA, key: process.env.PUBLIK_API_KEY };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kaashify-publik-'));
-  const cred = path.join(dir, 'publik', 'apps', 'kaashify.json');
+  const cred = path.join(dir, 'publik', 'apps', `${pub.module.APP_SLUG}.json`);
   const put = (c) => { fs.mkdirSync(path.dirname(cred), { recursive: true }); fs.writeFileSync(cred, JSON.stringify(c)); };
   try {
     process.env.LOCALAPPDATA = dir; delete process.env.PUBLIK_API_KEY;
     if (process.platform !== 'win32') return; // the publik folder follows LOCALAPPDATA on Windows only
-    process.env.KAASHIFY_PUBLIK = '1';
+    process.env.NUS_PUBLIK = '1';
     assert.equal(pub.canSwitch(), false, 'not signed in on this computer');
     put({ key: 'pk_test_1', choice: 'own_key' }); assert.equal(pub.canSwitch(), true);
     put({ key: 'pk_test_1', choice: null }); assert.equal(pub.canSwitch(), true);
     put({ key: 'pk_test_1', choice: 'publik' }); assert.equal(pub.canSwitch(), false, 'already on publik');
     put({ key: 'pk_test_1', choice: 'own_key' }); pub.setChoice('publik'); assert.equal(pub.choice(), 'publik'); assert.equal(pub.active(), true);
-    delete process.env.KAASHIFY_PUBLIK;
+    delete process.env.NUS_PUBLIK;
     put({ key: 'pk_test_1', choice: 'own_key' }); assert.equal(pub.canSwitch(), false, 'a build without publik');
   } finally {
-    for (const [k, v] of [['KAASHIFY_PUBLIK', saved.on], ['LOCALAPPDATA', saved.local], ['PUBLIK_API_KEY', saved.key]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    for (const [k, v] of [['NUS_PUBLIK', saved.on], ['LOCALAPPDATA', saved.local], ['PUBLIK_API_KEY', saved.key]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

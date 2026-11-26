@@ -81,7 +81,9 @@ Kaashify pauses, check the open window. **Esc** stops the current task.
 
 ## Build from source on Windows x64
 
-Use Node.js 24 LTS and npm. Install the pinned dependencies and local models,
+Use Node.js 24 LTS, npm, and Go. The installer build compiles the Chrome native
+messaging helper with Go. If Go is outside `PATH`, set `KAASHIFY_GO` to the
+full path of `go.exe`. Install the pinned dependencies and local models,
 then generate and verify the installer.
 
 ```powershell

@@ -184,7 +184,7 @@ class HandsAgent {
     if (gen !== this.gen || !setup.needed(task.request, fg)) return;
     const accepted = await this.askFirst({
       title: 'Set up Chrome for this task?',
-      detail: 'Confirm the extension in Chrome. Kaashify will pick up the task when it connects.',
+      detail: 'For AI tasks, Kaashify may send visible page text and control labels to your configured AI provider. Confirm the extension in Chrome to connect and resume this task.',
       confirmLabel: 'Set up Chrome', declineLabel: 'Use Windows controls', firm: true,
     }, { name: 'chrome-setup' }, gen);
     if (gen !== this.gen) return;
