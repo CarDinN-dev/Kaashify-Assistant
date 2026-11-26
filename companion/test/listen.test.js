@@ -168,7 +168,7 @@ test('a new press takes over from the wait, and key up leaves it running', () =>
   assert.match(main, /if \(ptt\.midTimer\) \{ clearTimeout\(ptt\.midTimer\); ptt\.midTimer = null; \} else ptt\.heldText = null;/);
   assert.match(main, /if \(!ptt\.heldText || ptt\.midTimer\) return;/);
   assert.match(main, /onFinal: joinFinal/);
-  assert.match(main, /onPartial: \(text, meta\) => \{ showHeard\(text\); if \(ptt\.heldText \|\| /, 'the next words of a held sentence fire nothing on their own');
+  assert.match(main, /showHeard\(text\);\s+if \(ptt\.heldText \|\| /, 'the next words of a held sentence fire nothing on their own');
 });
 
 test('Kaashify heard back is nothing: its own lines, whole, and never a person\'s ask or answer', () => {
@@ -180,5 +180,5 @@ test('Kaashify heard back is nothing: its own lines, whole, and never a person\'
   const route = main.slice(main.indexOf('async function routeUtterance('));
   assert.ok(route.indexOf('heardBack(text)') > 0 && route.indexOf('heardBack(text)') < route.indexOf('getReflex()'), 'before the reflex layer can fire');
   assert.match(route, /heardBack\(text\) && !\(agent && agent\.asking\(\)\)/, 'with a card up the words answer the card');
-  assert.match(main, /onPartial: \(text, meta\) => \{ showHeard\(text\); if \(ptt\.heldText \|\| heardBack\(text\)/, 'a partial cannot fire it either');
+  assert.match(main, /showHeard\(text\);\s+if \(ptt\.heldText \|\| heardBack\(text\)/, 'a partial cannot fire it either');
 });

@@ -400,9 +400,14 @@
   function speak(text) {
     if (!companionVoiceEnabled || pttHeld) return;
     if (!settings || !settings.speakReplies || !text) return;
-    speechSynthesis.cancel();
     const plain = plainify(text).slice(0, 2200);
     if (!plain.trim()) return;
+    if (settings.apiSpeech) {
+      const lines = plain.match(/.{1,290}(?:\s|$)|.{1,290}/gs) || [];
+      lines.forEach((line, index) => say(line, { restart: index === 0 }));
+      return;
+    }
+    speechSynthesis.cancel();
     const u = trackSpeech(new SpeechSynthesisUtterance(plain), plain.length);
     if (voice) u.voice = voice;
     u.rate = 1.05;
@@ -466,19 +471,21 @@
   // plays. When the voice is off or not installed, the system voice speaks.
   let ownVoice = { ready: false };
   let voiceCtx = null, voiceGen = 0, voiceSource = null;
+  let speechApiError = '';
   kaashify.on('voice:state', (s) => { ownVoice = s || { ready: false }; });
   // On battery Kaashify's breathing states draw at the rest rate (knot-engine.js).
   kaashify.on('power:state', (p) => { if (knot3d && knot3d.setLowPower) knot3d.setLowPower(!!(p && p.battery)); });
   // "Stop" / "I got it from here": quiet at once, mid-word.
   kaashify.on('voice:hush', () => stopSpeaking());
   function speakSystem(line) {
+    const gen = voiceGen;
     const u = trackSpeech(new SpeechSynthesisUtterance(line), line.length);
     if (voice) u.voice = voice;
     u.rate = 1.05;
     const onEnd = u.onend, onError = u.onerror;
-    const done = () => { sayBusy = false; sayNext(); };
-    u.onend = () => { if (onEnd) onEnd(); done(); };
-    u.onerror = () => { if (onError) onError(); done(); };
+    const done = (callback) => { if (gen !== voiceGen) return; callback?.(); sayBusy = false; sayNext(); };
+    u.onend = () => done(onEnd);
+    u.onerror = () => done(onError);
     sayBusy = true;
     speechSynthesis.speak(u);
   }
@@ -489,7 +496,7 @@
     // A context closed by a dead audio service is replaced, not reused.
     if (!voiceCtx || voiceCtx.state === 'closed') voiceCtx = new AudioContext();
     const i16 = new Int16Array(audio.pcm);
-    if (!i16.length || gen !== voiceGen) { sayBusy = false; sayNext(); return; }
+    if (!i16.length) throw new Error('no audio');
     const buf = voiceCtx.createBuffer(1, i16.length, audio.sampleRate || 24000);
     const ch = buf.getChannelData(0);
     for (let i = 0; i < i16.length; i++) ch[i] = i16[i] / 32768;
@@ -498,22 +505,47 @@
     voiceSource = src;
     setSpeaking(true);
     speakWatch = setTimeout(() => setSpeaking(false), buf.duration * 1000 + 400);
-    src.onended = () => { if (voiceSource === src) voiceSource = null; setSpeaking(false); sayBusy = false; sayNext(); };
+    src.onended = () => {
+      if (gen !== voiceGen) return;
+      voiceSource = null;
+      setSpeaking(false);
+      sayBusy = false;
+      sayNext();
+    };
     if (voiceCtx.state === 'suspended') voiceCtx.resume().catch(() => {});
     src.start();
+  }
+  function requestSpeech(item) {
+    if (!item.promise) item.promise = kaashify.voiceSay(item.line, item.cloud).catch(() => null);
+    return item.promise;
   }
   function sayNext() {
     if (sayBusy || !sayQueue.length) return;
     const item = sayQueue.shift();
     sayBusy = true;
     try {
-      if (item.own) {
+      if (item.own || item.cloud) {
         const gen = voiceGen;
-        // Already made (it was queued while the line before it played), or make it now.
-        (item.audio ? Promise.resolve(item.audio) : item.promise || kaashify.voiceSay(item.line)).then((audio) => { if (gen !== voiceGen) { sayBusy = false; sayNext(); return; } if (!audio) throw new Error('no audio'); if (item.first) vlog('voice: said in Fable: "' + item.line.slice(0, 40) + '"'); playPcm(audio, gen, item.sid); }).catch(() => { if (gen !== voiceGen) { sayBusy = false; sayNext(); return; } if (item.first) vlog('voice: said in the Windows voice (Fable failed): "' + item.line.slice(0, 40) + '"'); sentenceStarted(item.sid); speakSystem(item.line); });
-        // Make the next line ahead while this one plays.
-        const next = sayQueue[0];
-        if (next && next.own && !next.promise) next.promise = kaashify.voiceSay(next.line).then((a) => { next.audio = a; return a; });
+        requestSpeech(item).then(async (audio) => {
+          if (gen !== voiceGen) return;
+          const apiPlayback = item.cloud && !!audio?.pcm;
+          if (item.cloud) {
+            const message = audio?.error || '';
+            if (message && message !== speechApiError) showStatus(message);
+            speechApiError = message;
+            if (!audio?.pcm && item.own) audio = await kaashify.voiceSay(item.line, false);
+          }
+          if (gen !== voiceGen) return;
+          if (!audio?.pcm) throw new Error('no audio');
+          if (item.first) vlog(apiPlayback ? 'voice: said with API speech' : 'voice: said in Fable');
+          playPcm(audio, gen, item.sid);
+          const next = sayQueue[0];
+          if (next && (next.own || next.cloud)) requestSpeech(next);
+        }).catch(() => {
+          if (gen !== voiceGen) return;
+          sentenceStarted(item.sid);
+          speakSystem(item.line);
+        });
       } else { if (item.first) vlog('voice: said in the Windows voice (' + (ownVoice && ownVoice.installed ? 'Fable not ready' : 'Fable not installed') + '): "' + item.line.slice(0, 40) + '"'); sentenceStarted(item.sid); speakSystem(item.line); }
     } catch (_) { sayBusy = false; sentenceStarted(item.sid); }
   }
@@ -534,13 +566,13 @@
     if (opts && opts.ack) ackHoldUntil = Date.now() + ACK_HOLD_MS;
     else if (restart && Date.now() < ackHoldUntil) { restart = false; ackHoldUntil = 0; }
     // A new step's first line: marks still waiting on the old lines belong to nothing now.
-    if (restart) { sayWaiting.clear(); marksWaiting.clear(); sayQueue.length = 0; sayBusy = false; voiceGen++; try { speechSynthesis.cancel(); } catch (_) {} if (voiceSource) { try { voiceSource.stop(); } catch (_) {} voiceSource = null; } if (kaashify.voiceStop) kaashify.voiceStop(); }
+    if (restart) { sayWaiting.clear(); marksWaiting.clear(); stopSpeaking(); }
     // A ready-made line plays in Kaashify's voice even while the model is
     // still loading: it is a file, not a synthesis.
     const own = Boolean(kaashify.voiceSay && ownVoice && (ownVoice.ready || (opts && opts.cached && ownVoice.installed)));
-    const item = { line, own, first, sid: opts && opts.sid != null ? opts.sid : null };
+    const cloud = Boolean(kaashify.voiceSay && settings?.apiSpeech && !opts?.cached);
+    const item = { line, own, cloud, first, sid: opts && opts.sid != null ? opts.sid : null };
     if (item.sid != null) sayWaiting.add(item.sid);
-    if (own) item.promise = kaashify.voiceSay(line).then((a) => { item.audio = a; return a; });
     sayQueue.push(item);
     sayNext();
   }
@@ -778,7 +810,7 @@
 
   // ---- capture: mic (renderer side) --------------------------------------
   let audioCtx = null, micStream = null, micNode = null, micProc = null;
-  let pttHeld = false, dictationId = null;
+  let pttHeld = false, wakeListening = false, dictationId = null;
   let micStarting = null, micGeneration = 0;
   const captureOn = () => $('#stop-btn').classList.contains('active');
   // A mic that died underneath us (Chromium's audio service was killed, the
@@ -841,6 +873,7 @@
         if (generation !== micGeneration) return;
         kaashify.log('mic: track ended (' + (t.label || 'device') + ')');
         if (dictationId != null) kaashify.dictationMicFailed(dictationId);
+        else if (wakeListening) kaashify.wakeMicFailed();
         else if (!pttHeld) stopMic();
       }; });
       // The chord was released before the mic came up: it stays warm for the
@@ -887,8 +920,9 @@
           : 'Microphone failed: ' + (err && err.message);
       kaashify.log('mic error: ' + (err && err.message));
       setMicError(message);
-      if (dictationId == null) showStatus(message);
-      else kaashify.dictationMicFailed(dictationId);
+      if (dictationId != null) kaashify.dictationMicFailed(dictationId);
+      else if (wakeListening) kaashify.wakeMicFailed();
+      else showStatus(message);
       return false;
     }
   }
@@ -1001,7 +1035,9 @@
   // next press hears from the first frame; after that it closes.
   const MIC_WARM_MS = 45000;
   let micIdleTimer = null;
-  kaashify.on('ptt:state', ({ held, dictationId: id, closeMic }) => {
+  kaashify.on('ptt:state', ({ held, wake, dictationId: id, closeMic }) => {
+    if (wakeListening && !held) { if (islandOn) islandLine(''); else hideHint(); }
+    wakeListening = !!held && !!wake;
     pttHeld = !!held;
     dictationId = id ?? null;
     if (pttHeld && play && play.active) stopPlay('task');

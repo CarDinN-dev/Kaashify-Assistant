@@ -59,6 +59,26 @@
     paintVoice(await api.voiceStatus());
   });
   api.on('home:voice', v => paintVoice(v));
+  $('#wake-commands-row').hidden = MAC_KEYS;
+  function paintVoiceOptions(s) {
+    $('#wake-commands').checked = s.wakeCommands === true && !s.openMic;
+    $('#api-speech').checked = s.apiSpeech === true;
+    $('#api-speech-note').textContent = s.keys?.openai
+      ? 'Sends reply text to OpenAI to generate speech. Your local voice plays if the API is unavailable.'
+      : 'Add an OpenAI key under API keys to use this voice. Your local voice plays until then.';
+  }
+  $('#wake-commands').onchange = e => run(async () => {
+    const enabled = e.target.checked;
+    const saved = await api.settingsSet(enabled ? { wakeCommands: true, openMic: false } : { wakeCommands: false });
+    paintVoiceOptions(saved);
+    notice(enabled ? 'Tap the talk shortcut and start with “Hey Kaashify”.' : 'Wake commands are off.');
+  }, e.target);
+  $('#api-speech').onchange = e => run(async () => {
+    const enabled = e.target.checked;
+    const saved = await api.settingsSet(enabled ? { apiSpeech: true, speakReplies: true } : { apiSpeech: false });
+    paintVoiceOptions(saved);
+    notice(enabled && !saved.keys?.openai ? 'Add an OpenAI key in Settings to use API voice.' : 'Saved.');
+  }, e.target);
   // The optional speech model row, the same shape as the voice row above.
   function paintSpeech(v) {
     const box = $('#speech-model'), note = $('#speech-model-note'), prog = $('#speech-model-progress');
@@ -190,6 +210,7 @@
     $('#ptt-live').textContent=chord(status.ptt.accelerator);
     $('#ptt-input').placeholder=chord(status.ptt.accelerator);
     $('#open-mic').checked=!!s.openMic;
+    paintVoiceOptions(s);
     fillMics(s);
     $('#persist-transcripts-home').checked=s.persistTranscripts!==false;
     $('#save-audio-home').checked=!!s.saveAudio;
@@ -447,7 +468,13 @@
   };
   window.addEventListener('pagehide',stopMicTest);
   if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener)navigator.mediaDevices.addEventListener('devicechange',()=>{setTimeout(()=>fillMics(),400);});
-  const fields={'open-mic':['openMic',e=>e.checked],'speak-replies-home':['speakReplies',e=>e.checked],'sounds':['sounds',e=>e.checked],'draw-on-screen':['drawOnScreen',e=>e.checked],'start-with-windows':['startWithWindows',e=>e.checked],'focus-guard':['focusGuard',e=>e.checked],'hands':['hands',e=>e.checked],'dictation':['dictation',e=>e.checked],'tasks':['tasks',e=>e.checked],'knot-island':['knotIsland',e=>e.checked],'focus-feeds':['focusGuardFeeds',e=>e.value.split(',').map(x=>x.trim()).filter(Boolean)],'hide-from-capture':['hideFromCapture',e=>e.checked],'persist-transcripts-home':['persistTranscripts',e=>e.checked],'save-audio-home':['saveAudio',e=>e.checked],'retention-days':['audioRetentionDays',e=>Number(e.value)],'knot-display':['knotDisplayId',e=>e.value?Number(e.value):null]};
+  $('#open-mic').onchange = e => run(async () => {
+    const enabled = e.target.checked;
+    const saved = await api.settingsSet(enabled ? { openMic: true, wakeCommands: false } : { openMic: false });
+    paintVoiceOptions(saved);
+    notice('Saved.');
+  }, e.target);
+  const fields={'speak-replies-home':['speakReplies',e=>e.checked],'sounds':['sounds',e=>e.checked],'draw-on-screen':['drawOnScreen',e=>e.checked],'start-with-windows':['startWithWindows',e=>e.checked],'focus-guard':['focusGuard',e=>e.checked],'hands':['hands',e=>e.checked],'dictation':['dictation',e=>e.checked],'tasks':['tasks',e=>e.checked],'knot-island':['knotIsland',e=>e.checked],'focus-feeds':['focusGuardFeeds',e=>e.value.split(',').map(x=>x.trim()).filter(Boolean)],'hide-from-capture':['hideFromCapture',e=>e.checked],'persist-transcripts-home':['persistTranscripts',e=>e.checked],'save-audio-home':['saveAudio',e=>e.checked],'retention-days':['audioRetentionDays',e=>Number(e.value)],'knot-display':['knotDisplayId',e=>e.value?Number(e.value):null]};
   for(const [id,[key,value]] of Object.entries(fields))$('#'+id).onchange=e=>run(async()=>{await api.settingsSet({[key]:value(e.target)});notice('Saved.');},e.target);
   // Two switches, one setting: the first-run card and the Privacy card stay in step.
   $('#knot-move').onchange=e=>run(async()=>{const corner=e.target.value;e.target.value='';if(corner){await api.control('move-'+corner);notice('Kaashify is on its way.');}});
@@ -501,7 +528,7 @@
     openSettings:section=>run(async()=>{await setView('settings');if(section==='voice'){await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));const box=$('#own-voice');if(box){box.closest('.card').scrollIntoView({block:'start'});box.focus({preventScroll:true});notice('Fable needs one download first. Turn on Kaashify voice switch here.');}}}),
     onError:e=>notice(e.message||String(e),true)});
   // A switch flipped anywhere: the home row and the Settings page both follow.
-  function mirrorSettings(s){homeView.onSettings(s);if(view!=='settings')return;for(const [id,on] of [['open-mic',!!s.openMic],['sounds',s.sounds!==false],['draw-on-screen',s.drawOnScreen!==false],['start-with-windows',s.startWithWindows===true],['hands',s.hands===true],['tasks',s.tasks===true],['knot-island',s.knotIsland===true],['hide-from-capture',s.hideFromCapture!==false],['speak-replies-home',!!s.speakReplies]]){const box=$('#'+id);if(box&&box!==document.activeElement)box.checked=on;}}
+  function mirrorSettings(s){homeView.onSettings(s);if(view!=='settings')return;paintVoiceOptions(s);for(const [id,on] of [['open-mic',!!s.openMic],['sounds',s.sounds!==false],['draw-on-screen',s.drawOnScreen!==false],['start-with-windows',s.startWithWindows===true],['hands',s.hands===true],['tasks',s.tasks===true],['knot-island',s.knotIsland===true],['hide-from-capture',s.hideFromCapture!==false],['speak-replies-home',!!s.speakReplies]]){const box=$('#'+id);if(box&&box!==document.activeElement)box.checked=on;}}
   api.on('home:settings',mirrorSettings);
   api.on('home:tasks',p=>homeView.onTask(p));
   api.on('home:knot',w=>homeView.onKnot(w));

@@ -111,7 +111,7 @@ test('the Companion makes Ctrl+Alt the default, keeps the old chord as a choice,
   assert.match(keys, /const r = ptt\.chord\.onKey\(vk, !!e\.down\)/);
   // 0.1.37: the talk key does not start while a dictation (Ctrl + Win) is held or a Win key is down.
   assert.match(keys, /if \(r === 'down' && !dict\.held && !\(dict\.tracker && dict\.tracker\.winDown\)\) pttStart\(\);/);
-  assert.match(keys, /if \(r === 'up' && ptt\.held && !OPEN_MIC\) pttStop\('release'\);/);
+  assert.match(keys, /if \(r === 'up' && ptt\.held && !OPEN_MIC && !ptt\.wake\) pttStop\('release'\);/);
   const stop = main.slice(main.indexOf('async function pttStop('), main.indexOf('// Reflex first.'));
   assert.match(stop, /PTT_TAP_MS/, 'a hold shorter than a tap with nothing heard is an app shortcut, not an ask');
   const set = main.slice(main.indexOf('function setPttShortcut('), main.indexOf('// -------- IPC'));

@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('kaashify', {
   micPcm: (arrayBuffer) => ipcRenderer.send('companion:mic:pcm', arrayBuffer),
   pttPcm: (arrayBuffer, dictationId) => ipcRenderer.send('companion:ptt:pcm', arrayBuffer, dictationId),
   dictationMicFailed: (id) => ipcRenderer.send('companion:dictation:mic-failed', id),
+  wakeMicFailed: () => ipcRenderer.send('companion:wake:mic-failed'),
   systemPcm: (arrayBuffer) => ipcRenderer.send('companion:system:pcm', arrayBuffer),
   setIgnoreMouse: (v, why) => ipcRenderer.send('companion:mouse:ignore', v, why === 'pill' ? 'pill' : undefined),
   // The overlay took the mouse far from Kaashify, or Kaashify was dragged: for route.log.
@@ -40,7 +41,7 @@ contextBridge.exposeInMainWorld('kaashify', {
   // The composer opened: a brain process can start before the words are in.
   guideWarm: () => ipcRenderer.send('companion:guide:warm'),
   // Kaashify's own voice: one line in, samples back (Int16 PCM); stop drops the rest.
-  voiceSay: (text) => ipcRenderer.invoke('companion:voice:say', String(text || '')),
+  voiceSay: (text, cloud) => ipcRenderer.invoke('companion:voice:say', String(text || ''), cloud === true),
   voiceStop: () => ipcRenderer.send('companion:voice:stop'),
   guideDismiss: (reason, sessionId) => ipcRenderer.send('companion:guide:dismiss', { reason: String(reason || ''), sessionId: sessionId == null ? '' : String(sessionId) }),
   guideKeep: (sessionId) => ipcRenderer.send('companion:guide:keep', { sessionId }),

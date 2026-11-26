@@ -81,7 +81,7 @@ test('the hello line is spoken, in Fable, and the log says how (Pranav\'s try of
   assert.match(hello, /getVoice\(\)\.synth\(Tour\.HELLO_LINE\)\)\.then\(\(a\) => \{ getLines\(\)\.put\(Tour\.HELLO_LINE, a\);/, 'the line is made in Fable while the note is typed');
   assert.ok(hello.indexOf('getVoice().synth(Tour.HELLO_LINE)') < hello.indexOf('Hello.run('), 'started before the typing');
   // The renderer reports how each card's line was said, and that goes in route.log.
-  assert.match(r, /vlog\('voice: said in Fable: "'/);
+  assert.match(r, /vlog\(apiPlayback \? 'voice: said with API speech' : 'voice: said in Fable'\)/);
   assert.match(r, /vlog\('voice: said in the Windows voice \('/);
   assert.match(r, /vlog\('voice: not said \('/);
   assert.match(r, /function vlog\(m\) \{ try \{ if \(kaashify\.log\) kaashify\.log\(m\); \} catch/, 'a log line never stops the speech');

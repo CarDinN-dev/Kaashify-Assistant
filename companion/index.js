@@ -12,6 +12,9 @@ const fs = require('fs');
 const store = require('./src/store');
 const { captureScreenshot } = require('./src/screen');
 const { createSTT } = require('./src/stt');
+const { createSpeechApi } = require('./src/voice/speech-api');
+const { wakeCommand } = require('./src/voice/wake-command');
+const speechApi = createSpeechApi();
 const { createLLM } = require('./src/llm');
 const { modelSettingsPatch, selectModel } = require('./src/models');
 const { plainAskError } = require('./src/ask-error');
@@ -411,9 +414,10 @@ function createOverlayWindow() {
   // A click on Kaashify makes the overlay the foreground window: the one
   // moment a stripped always-on-top bit can be put back (see reassertTopmost).
   win.on('focus', reassertTopmost);
-  win.on('hide', () => typingSession.stop('hidden'));
-  win.on('closed', () => typingSession.stop('hidden'));
-  win.webContents.on('did-start-loading', () => typingSession.stop('hidden'));
+  const stopHiddenMic = () => { if (ptt.wake) void pttStop('hidden'); typingSession.stop('hidden'); };
+  win.on('hide', stopHiddenMic);
+  win.on('closed', stopHiddenMic);
+  win.webContents.on('did-start-loading', stopHiddenMic);
 
   applyCapturePolicy();
   if (process.platform === 'darwin') {
@@ -583,6 +587,7 @@ function stopFlushLoop() { if (flushTimer) { clearInterval(flushTimer); flushTim
 
 // -------- capture toggle --------
 function setCapturing(active) {
+  if (active && ptt.wake) void pttStop('meeting');
   if (active === state.capturing) return active;
   if (active && hooks.captureAllowanceMs) {
     const allowance = Number(hooks.captureAllowanceMs());
@@ -992,7 +997,7 @@ function publikSwitch() {
   routeLog('publik: switch from an error bubble, ' + (ok ? 'done' : 'not done'));
   flash(ok ? 'Switched to publik. Ask again.' : 'I could not switch. Open Settings, Keys to change who answers.', 4500);
 }
-const askModeFor = (source) => (source === 'voice' ? 'voice' : 'text');
+const askModeFor = (source) => (source === 'voice' || source === 'wake' ? 'voice' : 'text');
 // The "no AI set up yet" bubble: an ask that could not be answered, and the
 // key prompt a new install saw. Both are leak-map rows, nothing more.
 function noteNoProvider(mode, feature) {
@@ -1519,6 +1524,7 @@ function noteSettingsSave() {
 function applySettingsPatch(patch) {
   sttDisabled = false;
   const s = store.setSettings(patch);
+  if (patch.apiSpeech === false || Object.hasOwn(patch.apiKeys || {}, 'openai')) speechApi.stop();
   noteSettingsSave();
   // The voice switch: the renderer must know at once whether to use it.
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'voice')) { try { const st = getVoice().status(); send('voice:state', st); if (st.installed) getVoice().warm(); } catch (_) { /* no voice */ } }
@@ -1529,7 +1535,7 @@ function applySettingsPatch(patch) {
   jev.configure({ apiKey: s.apiKeys && s.apiKeys.typesafe });
   if (STANDALONE) {
     const nextOpenMic = s.openMic ?? (process.env.KAASHIFY_REFLEX_OPENMIC === '1');
-    if (nextOpenMic !== OPEN_MIC && ptt.held) pttStop('settings');
+    if (ptt.held && (nextOpenMic !== OPEN_MIC || (ptt.wake && patch.wakeCommands === false))) pttStop('settings');
     OPEN_MIC = nextOpenMic;
     if (patch.knotCorner) send('knot:corner', { corner: s.knotCorner });
     if (Object.prototype.hasOwnProperty.call(patch, 'knotDisplayId')) reboundOverlay();
@@ -1618,13 +1624,14 @@ function registerIpc() {
   companionIpc.on('companion:ask', (_e, payload) => runFeature(payload.mode, payload.text));
   companionIpc.on('companion:mic:pcm', (_e, arrayBuffer) => { if (state.capturing) buffers.you.push(Buffer.from(arrayBuffer)); });
   companionIpc.on('companion:dictation:mic-failed', (_e, id) => typingSession.microphoneFailed(id));
+  companionIpc.on('companion:wake:mic-failed', () => { if (ptt.wake) void pttStop('microphone'); });
   companionIpc.on('companion:ptt:pcm', (_e, arrayBuffer, dictationId) => {
     if (dictationId != null) { typingSession.push(dictationId, arrayBuffer); return; }
     // A dictation holds the mic on its own: its words never reach the talk key's ears.
     if (dict.held) { dict.chunks.push(Buffer.from(arrayBuffer)); return; }
     if (!ptt.held) return;
     const buf = Buffer.from(arrayBuffer);
-    ptt.chunks.push(buf);
+    if (!ptt.wake) ptt.chunks.push(buf);
     if (ptt.streaming && Date.now() > speakMuteUntil) getListener().push(buf);
   });
   companionIpc.on('companion:system:pcm', (_e, arrayBuffer) => { if (state.capturing) buffers.them.push(Buffer.from(arrayBuffer)); });
@@ -1701,9 +1708,14 @@ function registerIpc() {
   // Kaashify's own voice: a line in, Int16 samples back; the renderer plays them in order.
   // The short lines (acknowledgements, small talk, hello) come from the
   // ready-made files when they are there: a file read, not a synthesis.
-  companionIpc.handle('companion:voice:say', async (_e, text) => {
+  companionIpc.handle('companion:voice:say', async (_e, text, cloud) => {
     try {
       const line = String(text || '').slice(0, 400);
+      if (cloud === true) {
+        const settings = store.getSettings();
+        if (!settings.apiSpeech || !companionVoiceEnabled || ptt.held) return null;
+        return await speechApi.synthesize(line, settings.apiKeys?.openai);
+      }
       const hit = getLines().get(line);
       if (hit) return { sampleRate: hit.sampleRate, pcm: hit.pcm.buffer.slice(hit.pcm.byteOffset, hit.pcm.byteOffset + hit.pcm.byteLength), ms: 0, secs: hit.secs, cached: true };
       const a = await getVoice().synth(line);
@@ -1711,7 +1723,7 @@ function registerIpc() {
       return { sampleRate: a.sampleRate, pcm: a.pcm.buffer.slice(a.pcm.byteOffset, a.pcm.byteOffset + a.pcm.byteLength), ms: a.ms, secs: a.secs };
     } catch (e) { return null; }
   });
-  companionIpc.on('companion:voice:stop', () => { try { getVoice().stop(); } catch (_) { /* not loaded */ } });
+  companionIpc.on('companion:voice:stop', () => { speechApi.stop(); try { getVoice().stop(); } catch (_) { /* not loaded */ } });
   companionIpc.on('companion:strand:arrived', (_e, p) => { harness.arrivedAt = Date.now(); if (guide) guide.onArrived(p && p.seq != null ? p.seq : undefined); });
   companionIpc.on('companion:guide:keep', (_e, p) => { console.log('[companion] keep', p && p.sessionId); if (guide) guide.keep(); });
   companionIpc.on('companion:guide:skip', (_e, p) => { console.log('[companion] skip', p && p.sessionId); if (guide) guide.skip(); });
@@ -2305,7 +2317,7 @@ function warmRecallBrain() {
 // my two eigenvalue chats"): read out with no model, or answered in words
 // with the passages it needs. null from prepare: not one after all.
 async function answerRecall(text, source, heardAt) {
-  const voice = source === 'voice';
+  const voice = source === 'voice' || source === 'wake';
   // An ask the model answers: "Let me check." at once (a cached line), and its
   // Claude Code process starting, while the passages are found.
   const kind = (parseRecallAsk(text) || {}).kind;
@@ -2433,7 +2445,7 @@ function readWorkflow() {
   return probe.request('workflow.read', {}, 3000).catch(() => null);
 }
 function routeWorkflow(text, source, heardAt) {
-  if (agent?.active() || !['typed', 'voice'].includes(source)) return false;
+  if (agent?.active() || !['typed', 'voice', 'wake'].includes(source)) return false;
   const last = agent?.last;
   const followupFinish = last?.workflow && ['email', 'survey'].includes(last.workflow.kind)
     && Date.now() - last.endedAt < 5 * 60000 && /^\s*(?:please\s+)?(?:send|submit)(?: (?:it|this|that))?[.!?]*\s*$/i.test(text);
@@ -2454,7 +2466,7 @@ function routeWorkflow(text, source, heardAt) {
   if (guide?.active()) guide.dismiss('workflow');
   releaseWorkflowFocus();
   noteAsk(askModeFor(source), 'hands');
-  getAgent().run(text, source, { askedAt: heardAt, workflow: spec });
+  getAgent().run(text, source === 'typed' ? 'typed' : 'voice', { askedAt: heardAt, workflow: spec });
   return true;
 }
 
@@ -2753,7 +2765,7 @@ function currentTask() {
 }
 function projectReply(text, source) {
   if (agent && agent.active()) { flash(text, 4000); return; }
-  send('guide:bubble', { text, anchor: 'knot', task: 'ask', kicker: 'project', actions: [{ id: 'dismiss', label: 'OK' }], sessionId: null, speak: source === 'voice' ? text : undefined });
+  send('guide:bubble', { text, anchor: 'knot', task: 'ask', kicker: 'project', actions: [{ id: 'dismiss', label: 'OK' }], sessionId: null, speak: source === 'voice' || source === 'wake' ? text : undefined });
 }
 // Every project phrase comes through here. With the Task list off nothing was
 // recorded, so a phrase plainly about a project turns it on and says so instead
@@ -3612,10 +3624,10 @@ function wireProbeEvents() {
     if (ptt.chord && MOD_VKS.includes(vk)) {
       const r = ptt.chord.onKey(vk, !!e.down);
       if (r === 'down' && !dict.held && !(dict.tracker && dict.tracker.winDown)) pttStart();
-      if (r === 'up' && ptt.held && !OPEN_MIC) pttStop('release');
+      if (r === 'up' && ptt.held && !OPEN_MIC && !ptt.wake) pttStop('release');
       return;
     }
-    if (vk === ptt.vk) { if (!e.down && ptt.held) pttStop('release'); if (vk !== 27) return; }
+    if (vk === ptt.vk) { if (!e.down && ptt.held && !ptt.wake) pttStop('release'); if (vk !== 27) return; }
     if (guide) guide.onKey(vk, !!e.down);
     if (ASSIGNMENT_WATCH === 'events' && assignment && assignment.isOn() && !e.down && ASSIGNMENT_KEYS.includes(vk)) assignment.poke('key');
   });
@@ -3719,6 +3731,7 @@ const ptt = { held: false, chunks: [], startedAt: 0, timer: null, accelerator: n
 // Open mic for the reflex layer: one press starts listening, the next ends it.
 let OPEN_MIC = process.env.KAASHIFY_REFLEX_OPENMIC === '1';
 const OPEN_MIC_MAX_MS = 180000;
+const WAKE_MAX_MS = 30000;
 
 // Streaming ears. While the key is down (or the mic is open) speech is cut at
 // pauses and transcribed as it arrives, so a launch can fire mid-sentence.
@@ -3727,15 +3740,22 @@ function getListener() {
   if (!listener) {
     listener = createListener({
       userData: app.getPath('userData'),
-      log: (m) => console.log(m),
+      log: (m) => { if (!ptt.wake) console.log(m); },
       onCommand: (text, meta) => {
-        if (!ptt.held || ptt.sessionStart || !earlyVoiceCommand(text)) return false;
+        if (!ptt.held || ptt.wake || ptt.sessionStart || !earlyVoiceCommand(text)) return false;
         heardSegment(text);
         ptt.finals++;
         routeUtterance(text, 'voice', meta.heardAt, meta.seg);
         return true;
       },
-      onPartial: (text, meta) => { showHeard(text); if (ptt.heldText || heardBack(text) || typingCommand(text) || ptt.sessionStart || selection || assignment?.isOn() || classifyAsk(text, false)) return; if (parseRecallAsk(text)) { warmRecallBrain(); return; } earlyGuideRead(text, 'voice'); if (!state.busy && !ownPath(text) && !handsClaims(text) && !handsFollowUp(text) && !(agent && agent.active())) getReflex().handle(text, { final: false, uttId: meta && meta.seg, keyed: !OPEN_MIC }).catch(() => {}); },
+      onPartial: (text, meta) => {
+        if (ptt.wake) return;
+        showHeard(text);
+        if (ptt.heldText || heardBack(text) || typingCommand(text) || ptt.sessionStart || selection || assignment?.isOn() || classifyAsk(text, false)) return;
+        if (parseRecallAsk(text)) { warmRecallBrain(); return; }
+        earlyGuideRead(text, 'voice');
+        if (!state.busy && !ownPath(text) && !handsClaims(text) && !handsFollowUp(text) && !(agent && agent.active())) getReflex().handle(text, { final: false, uttId: meta && meta.seg, keyed: !OPEN_MIC }).catch(() => {});
+      },
       // Names whisper should know: the product, and the people and courses in memory.
       vocabulary: () => whisperVocabulary(),
       // The optional engine for finished sentences; nothing changes until it is on and loaded.
@@ -3758,6 +3778,13 @@ function wholePressWanted(text) { return process.env.KAASHIFY_WHOLE_PRESS !== '0
 // only about a breath for the next final, even across a release and a new press.
 const MID_PHRASE_MS = 1500;
 function joinFinal(text, meta) {
+  if (ptt.wake) {
+    const command = wakeCommand(text);
+    if (!ptt.held || !command || heardBack(text)) return;
+    void pttStop('wake-command');
+    void routeUtterance(command, 'wake', meta?.heardAt, meta?.seg);
+    return;
+  }
   clearTimeout(ptt.midTimer); ptt.midTimer = null;
   heardSegment(text);
   ptt.finals++;
@@ -3931,7 +3958,8 @@ function pttStart() {
   // repeat used to count as a fresh press, so holding the keys opened and
   // closed the mic every 700 ms and chopped speech into fragments (live
   // 2026-09-21). One press is one run of callbacks with no 400 ms gap in it.
-  if (OPEN_MIC) {
+  const wake = !OPEN_MIC && STANDALONE && !IS_MAC && (ptt.wake || store.getSettings().wakeCommands === true);
+  if (OPEN_MIC || wake) {
     const now = Date.now();
     const repeat = now - (ptt.lastCallAt || 0) < 400;
     ptt.lastCallAt = now;
@@ -3939,10 +3967,11 @@ function pttStart() {
   }
   if (ptt.held) {
     // Key repeat while held (probe) or a second press to end (no probe).
-    if ((OPEN_MIC || !probeReady()) && Date.now() - ptt.startedAt > 700) pttStop('toggle');
+    if ((OPEN_MIC || wake || !probeReady()) && Date.now() - ptt.startedAt > 700) pttStop('toggle');
     return;
   }
   if (state.capturing) { flash('Listening to a meeting right now. Stop that first to talk to me.', 3500); return; }
+  if (wake && !getListener().available) { flash('Wake commands need the built-in speech model. Reinstall Kaashify to restore it.', 5000); return; }
   const gs = guide ? guide.status().state : 'idle';
   if (guide && guide.active() && gs !== 'pointing' && gs !== 'explaining') return;   // mid-read: let it finish
   // The renderer cancels speech on this press. Its estimated echo window must
@@ -3951,6 +3980,7 @@ function pttStart() {
   hooks.onVoiceTakeover?.();
   speechTurn++;
   ptt.held = true;
+  ptt.wake = wake;
   ptt.press++;
   ptt.chunks = [];
   ptt.startedAt = Date.now();
@@ -3960,7 +3990,7 @@ function pttStart() {
   // the rest. Otherwise a new press starts clean.
   if (ptt.midTimer) { clearTimeout(ptt.midTimer); ptt.midTimer = null; } else ptt.heldText = null;
   ptt.heard = ''; ptt.lastPartial = '';
-  ptt.streaming = getReflex().enabled() && getListener().available;
+  ptt.streaming = wake || (getReflex().enabled() && getListener().available);
   getReflex().warm();
   warmGuideBrain();
   // The resident whisper (src/whisper-server.js) loads while the person talks.
@@ -3968,13 +3998,14 @@ function pttStart() {
   // So does Parakeet, when it is switched on and installed; whisper covers until it is up.
   try { getParakeet().warm(); } catch (_) { /* whisper answers */ }
   if (ptt.streaming) getListener().reset();
-  send('ptt:state', { held: true });
+  send('ptt:state', { held: true, wake });
   send('guide:state', { state: 'listening', task: 'guide' });
-  if (probeReady() && !OPEN_MIC && !ptt.chord) {
+  if (wake) { armEsc(); flash('Say “Hey Kaashify” followed by one command. Press Esc to stop listening.', WAKE_MAX_MS); }
+  if (probeReady() && !OPEN_MIC && !wake && !ptt.chord) {
     if (guidePointing()) guide.startWatch([ptt.vk]);
     else probe.watch({ keys: [ptt.vk], click: false, fg: false }).catch(() => {});
   }
-  ptt.timer = setTimeout(() => pttStop('timeout'), OPEN_MIC ? OPEN_MIC_MAX_MS : PTT_MAX_MS);
+  ptt.timer = setTimeout(() => pttStop('timeout'), wake ? WAKE_MAX_MS : OPEN_MIC ? OPEN_MIC_MAX_MS : PTT_MAX_MS);
   startMacReleaseWatch();
 }
 
@@ -4003,6 +4034,16 @@ async function pttStop(reason) {
   ptt.held = false;
   clearTimeout(ptt.timer);
   ptt.timer = null;
+  if (ptt.wake) {
+    getListener().reset();
+    ptt.wake = false;
+    ptt.streaming = false;
+    send('ptt:state', { held: false, closeMic: true });
+    if (reason === 'microphone') flash('Wake commands stopped because the microphone is unavailable.', 4000);
+    if (!harness.active && !selection && !tasksPanelOpen && !agent?.active() && !guide?.active()) disarmEsc();
+    restoreKnotState();
+    return;
+  }
   send('ptt:state', { held: false });
   const tap = Boolean(ptt.chord) && reason === 'release' && keyUpAt - ptt.startedAt < PTT_TAP_MS && !ptt.heard && !ptt.lastPartial;
   if (tap) {
@@ -4109,7 +4150,7 @@ function typingOwnsMic() { return typingSession.state() === 'active' || typingSe
 function handleTypingCommand(text, source) {
   const command = typingCommand(text);
   if (!command) return false;
-  if (source !== 'typed' && source !== 'voice') return false;
+  if (!['typed', 'voice', 'wake'].includes(source)) return false;
   if (openMicSource(source)) {
     if (!ptt.held) restoreKnotState();
     return true;
@@ -4389,7 +4430,7 @@ let reflexTurn = null;     // { source, heardAt } while the reflex layer handles
 let assignmentHeardAt = 0;
 function sayAck(kind, source, heardAt) {
   const line = ACKS[kind];
-  if (!line || source !== 'voice' || !companionVoiceEnabled || ptt.held) return false;
+  if (!line || (source !== 'voice' && source !== 'wake') || !companionVoiceEnabled || ptt.held) return false;
   if (lastAck && lastAck.press === ptt.press) return false;
   const ms = heardAt ? Math.max(0, Date.now() - heardAt) : null;
   lastAck = { line, kind, at: Date.now(), ms, press: ptt.press, used: false };
@@ -5090,7 +5131,7 @@ function routeUtteranceSlow(text, source, heardAt) {
   // The open mic hears the whole room, so a yes from it needs the button, and
   // it never resumes or starts a Hands task on its own (security audit 2026-11-01).
   const roomMic = source === 'voice' && OPEN_MIC;
-  if (agent && agent.asking()) { const a = agent.spoken(kind.text, { roomMic, heardAt }); if (a === 'needs-button') flash(roomMic ? 'With the open mic on, that one needs the Yes button.' : 'That one needs the Yes button.', 3000); restoreKnotState(); return; }
+  if (agent && agent.asking()) { const a = agent.spoken(kind.text, { roomMic: roomMic || source === 'wake', heardAt }); if (a === 'needs-button') flash('Use the Yes button to confirm that action.', 3000); restoreKnotState(); return; }
   // "Remind me at 4 to ...", "set a timer for 10 minutes", "cancel the timer":
   // read by code, no model, nothing on the screen touched.
   { const rm = parseReminder(kind.text); if (rm) { routeLog('-> reminders (' + rm.kind + '): "' + kind.text.slice(0, 80) + '"'); handleReminder(rm, source); restoreKnotState(); return; } }
@@ -5205,7 +5246,7 @@ function handleReminder(rm, source) {
   if (rm.kind === 'invalid') { flash(rm.message, 4500); return; }
   const r = getReminders();
   if (rm.kind === 'list') {
-    send('guide:bubble', { text: describeList(r.list()), anchor: 'knot', task: 'ask', kicker: 'reminders', actions: [{ id: 'dismiss', label: 'OK' }], sessionId: null, speak: source === 'voice' ? describeList(r.list()) : undefined });
+    send('guide:bubble', { text: describeList(r.list()), anchor: 'knot', task: 'ask', kicker: 'reminders', actions: [{ id: 'dismiss', label: 'OK' }], sessionId: null, speak: source === 'voice' || source === 'wake' ? describeList(r.list()) : undefined });
     return;
   }
   if (rm.kind === 'cancel') {
@@ -5510,12 +5551,18 @@ function stopTypingFromEscape() {
   return typingSession.stop();
 }
 
+function stopWakeFromEscape() {
+  if (!ptt.wake) return false;
+  void pttStop('escape');
+  return true;
+}
+
 function armEsc() {
   if (harness.esc) return;
-  try { harness.esc = globalShortcut.register('Escape', () => { if (stopTypingFromEscape()) return; if (tour && tour.handsRunning) { tour.handsAbort = true; return; } if (tasksPanelOpen) { send('tasks:event', { type: 'esc' }); return; } if (agent && agent.active()) stopHands('esc'); else if (guide && guide.active()) guide.dismiss('esc'); else guideDismiss('esc'); }); } catch (_) { harness.esc = false; }
+  try { harness.esc = globalShortcut.register('Escape', () => { if (stopWakeFromEscape() || stopTypingFromEscape()) return; if (tour && tour.handsRunning) { tour.handsAbort = true; return; } if (tasksPanelOpen) { send('tasks:event', { type: 'esc' }); return; } if (agent && agent.active()) stopHands('esc'); else if (guide && guide.active()) guide.dismiss('esc'); else guideDismiss('esc'); }); } catch (_) { harness.esc = false; }
 }
 function disarmEsc() {
-  if (!harness.esc || typingSession.state() !== 'idle') return;
+  if (!harness.esc || ptt.wake || typingSession.state() !== 'idle') return;
   try { globalShortcut.unregister('Escape'); } catch (_) { /* already gone */ }
   harness.esc = false;
 }

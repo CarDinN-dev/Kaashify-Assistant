@@ -28,6 +28,8 @@ const DEFAULTS = {
   deepQueryUrl: 'http://127.0.0.1:8765/api/ask',
   // Read replies aloud. On for rehearsal, off during a real call.
   speakReplies: false,
+  apiSpeech: false,
+  wakeCommands: false,
   // Explicit opt-in. When false, the Companion can show that Kaashify is linked but
   // never sends the shared semester snapshot to an external model provider.
   shareNusContextWithProvider: false,

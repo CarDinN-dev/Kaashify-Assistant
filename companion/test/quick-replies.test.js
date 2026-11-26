@@ -374,7 +374,7 @@ test('the words so far show by Kaashify while the key is held, and are masked fr
   vm.runInNewContext('showHeard("late")', ctx);
   assert.equal(sent.length, n, 'nothing after the key comes up, unless asked to linger');
   // Wired to the listener, cleared per press, lingers briefly after release.
-  assert.match(main, /onPartial: \(text, meta\) => \{ showHeard\(text\);/);
+  assert.match(main, /onPartial: \(text, meta\) => \{\s+if \(ptt\.wake\) return;\s+showHeard\(text\);/);
   assert.match(main, /ptt\.heard = ''; ptt\.lastPartial = '';/);
   assert.match(main, /if \(ptt\.heard \|\| ptt\.lastPartial\) showHeard\(ptt\.lastPartial, 3000\);/);
   // The renderer swaps the text in place and re-measures the box, which main masks.

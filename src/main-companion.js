@@ -125,7 +125,7 @@ function applyAutostart(on) { autostart.apply(on); }
 function settingsPatch(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid settings.');
   const clean = modelSettingsPatch(patch);
-  for (const key of ['openMic', 'persistTranscripts', 'saveAudio', 'speakReplies', 'smart', 'proactive', 'hideFromCapture', 'sounds', 'focusGuard', 'tasks', 'hands', 'knotIsland']) if (typeof patch[key] === 'boolean') clean[key] = patch[key];
+  for (const key of ['openMic', 'apiSpeech', 'wakeCommands', 'persistTranscripts', 'saveAudio', 'speakReplies', 'smart', 'proactive', 'hideFromCapture', 'sounds', 'focusGuard', 'tasks', 'hands', 'knotIsland']) if (typeof patch[key] === 'boolean') clean[key] = patch[key];
   // Draw on the screen (0.1.38): answers about the screen mark what they talk about.
   if (typeof patch.drawOnScreen === 'boolean') clean.drawOnScreen = patch.drawOnScreen;
   if (typeof patch.startWithWindows === 'boolean') clean.startWithWindows = patch.startWithWindows;
