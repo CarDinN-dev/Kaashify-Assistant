@@ -59,3 +59,36 @@ still required before general distribution. This build is unsigned.
 3. Verify supported providers and signed-in Claude Code with live accounts.
    The audit used synthetic credentials and did not test provider account or
    model availability. The Mac beta was outside this Windows audit.
+
+# Desktop control candidate audit
+
+26 November 2026 · Standalone Windows x64 · Source 6f26c15a6d261de7577a279d7d7a10a3dacc7c86
+
+## Release verdict
+
+Hold the candidate for the approved Chrome Web Store listing and native Windows verification. Local testing covered the desktop executor, the Chrome message bridge and extension logic, and the packaged dashboard. Chromium in this environment reported that administrator policy disables unpacked extensions. The candidate has an empty Store ID and exposes Chrome setup as unavailable.
+
+## Findings and fixes
+
+| ID | Severity | Finding and remediation | Verification |
+| --- | --- | --- | --- |
+| CTRL-01 | High | A model could emit several actions against one observation. If a step changed the window or Chrome document, the next action could target stale controls. Hands now runs one action per observation and checks the bound window handle and process. The Chrome extension also checks the tab, main document and snapshot, and rejects stale or reused snapshots. See `companion/src/hands/agent.js`, `companion/src/reflex/hands.ps1`, and `chrome-extension/background.js`. | Regression tests change the Chrome document, switch to an unrelated tab, and bring a different window of the same app to the foreground. The stale actions never reach the target. |
+| CTRL-02 | High | The generic browser path could treat a send or submit control like ordinary input. Browser controls now exclude sensitive fields and final-action buttons. Chrome field fills exclude Enter, and the native fallback checks protected workflows before sending input. See `chrome-extension/page.js` and `companion/src/hands/actions.js`. | Fixtures cover an ordinary form, an editable field with existing text, a password page, an attempted browser key submit, and stale action rejection. |
+| CTRL-03 | Medium | The queued Hands adapter dropped the task identity when forwarding observations. Interrupted compound tasks could also lose their completed-step state. The adapter preserves task context and records preparation steps. An interrupted compound task ends with a request to review which steps remain. See `companion/src/tasks/executors/hands.js`. | A queued task forwards its identity to observations and an interrupted task does not replay. |
+| CTRL-04 | Medium | The single-workflow router could consume a request spanning Chrome, Notepad and Outlook as an email-only task. Compound tasks identify each requested preparation step, preserve its order, and pass bounded page text as reference data. See `companion/src/hands/compound.js` and `companion/src/hands/agent.js`. | An integrated fixture reads Chrome facts, prepares the Notepad document, prepares the Outlook draft, and finishes in that order. |
+| CTRL-05 | Medium | First-run setup needed a visible confirmation, a way to decline, and feedback while waiting for Chrome. Kaashify exposes these states in the overlay and dashboard. The local bridge authenticates the native host and pairs one focused Chrome profile. See `companion/src/chrome/bridge.js` and `companion/home/home.js`. | The setup fixture verifies matching on-screen approval and continuation of the original task. The packaged dashboard displays the unavailable Store state and disables the setup button. |
+
+## Verification
+
+- The full Node suite passed 1,475 tests with 36 skipped. The focused Chrome and cross-app suite passed all ten tests.
+- The npm dependency audit returned zero advisories. The changed-file credential scan and packaged branding and credential checks returned zero findings.
+- PowerShell parsed the Windows input helpers, and PowerShell compiled the embedded C# declarations. The Go helper cross-built as a Windows x64 executable.
+- The packaged app opened the dashboard and overlay under Wine. The Chrome connection card showed the expected unavailable state for a build without an approved listing. The Windows package check byte-compared the changed packaged sources, the input helper, and licensing files.
+- The local Chrome Web Store ZIP passed archive integrity checks. Its extension files match the audited commit.
+- The local Windows NSIS installer and its embedded payload passed archive checks. The embedded app, Chrome helper, and Hands script match the verified package. Installer SHA-256 is `c34f30799cf88faddc5c435c52ce0e6021356e4347abfffe9424b3874b1ec2a7`.
+
+## Remaining release checks
+
+1. Submit the extension using the Chrome Web Store publisher account and complete review. Add the approved extension ID and rebuild the Windows candidate.
+2. Run the native Windows clean-install, upgrade and uninstall checks. Verify the approved Store installation and pairing flow, task resumption, cancellation, native Chrome and app focus changes, and Chrome-to-Notepad-to-Outlook using test accounts and data.
+3. Inspect the native approval cards, keyboard behavior, and protected final actions. Resolve and retest any findings before pushing the audited revision and uploading the verified installer and checksum.
